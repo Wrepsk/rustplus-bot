@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+.git
+node_modules
+dist
+data
+tests
+coverage
+*.db*
+*.log
+.rustplus-*.txt
+rustplus.config.json
+.lock-refresh
+.audit.json
+.audit-full.json
