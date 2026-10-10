@@ -1,5 +1,19 @@
 # Verification record
 
+## Pre-deployment review — 2026-10-11
+
+- Reviewed the existing application source, installed rustplus.js implementation/protobuf schema, dependencies, Dockerfile and Compose settings. Existing commands, architecture, panel layout and settings remain; database changes are additive.
+- `npm run check` passed: application/test TypeScript checks, ESLint, **77 tests across 10 files**, and production compilation. This includes 35 additional regression tests since the initial implementation.
+- Tests include actual Discord button dispatch with mocked membership/API calls, controlled outage timers, active-alarm warning deduplication, delayed/failed delivery, overlapping live/history chat, uncertain switch timeouts, old-connection reads, partial subscription recovery and SQLite reopening/migration. The real-library protocol test still uses only a local loopback server and dummy credentials.
+- The first sandboxed Vitest run failed to read worker temporary files on Windows; rerunning outside that sandbox resolved the environment issue. The final complete check succeeded outside the sandbox.
+- `node dist/index.js` without configuration correctly exited 1 and identified missing fields without printing secrets.
+- `docker compose config --no-env-resolution --quiet` passed. `docker build -t rust-discord-base-bot:review .` was attempted and failed before building because the local `dockerDesktopLinuxEngine` pipe is unavailable. No Docker image/container execution is claimed.
+- Full and production-only npm audits each reported **11 moderate, 0 high, 0 critical** findings. The compatible-fix dry run changed no dependency versions and retained all findings. See [SECURITY_REVIEW.md](SECURITY_REVIEW.md) for every affected package and its actual reachability.
+- `git diff --check` passed. No `.env`, pairing credentials or SQLite data files are tracked. No real Discord/Rust credentials were available or requested.
+- See [REVIEW_REPORT.md](REVIEW_REPORT.md) for findings/changes and [DEPLOYMENT_CHECKLIST.md](DEPLOYMENT_CHECKLIST.md) for unperformed live and VPS checks.
+
+## Initial implementation — historical record
+
 Verified locally on 2026-10-10 with Node.js 22.18.0 on Windows.
 
 - The starting directory was empty; no existing application needed preservation.

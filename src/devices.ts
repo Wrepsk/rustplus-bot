@@ -16,7 +16,7 @@ export class Devices extends EventEmitter {
     this.alarms = new AlarmTransitions(
       cooldownSeconds * 1000,
       (id) => store.lastAlert(id),
-      (id, at) => store.saveAlert(id, at),
+      (id, at) => store.recordAlarmActivation(id, at),
     );
     rust.on('status', () => {
       if (!rust.online) {
@@ -32,10 +32,14 @@ export class Devices extends EventEmitter {
     rust.on('device', (id: string, value: boolean, initial: boolean) => {
       const device = store.devices().find((d) => d.id === id);
       if (!device) return;
+      const resumed = initial && !this.states.has(id);
       this.states.set(id, value);
+      if (!value && device.type === 'alarm') store.clearRecoveryWarning(id);
       if (initial) this.alarms.sync(id, value);
       else if (device.type === 'alarm' && this.alarms.change(id, value, device.enabled))
         this.emit('alarm', device);
+      if (resumed && value && device.type === 'alarm' && device.enabled)
+        this.emit('alarmActive', device);
       this.emit('update');
     });
   }
@@ -49,9 +53,18 @@ export class Devices extends EventEmitter {
       return action === 'refresh'
         ? await this.rust.queryDevice(id)
         : await this.rust.setSwitch(id, action === 'on');
+    } catch (error) {
+      this.states.delete(id); // An uncertain write must never leave an apparently confirmed panel state.
+      throw error;
     } finally {
       this.busy.delete(id);
       this.emit('update');
     }
+  }
+  forget(id: string): void {
+    this.states.delete(id);
+    this.alarms.forget(id);
+    this.rust.forgetDevice(id);
+    this.emit('update');
   }
 }

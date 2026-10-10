@@ -58,6 +58,11 @@ describe('persistent Discord control panel', () => {
       expect(initial.embeds[0].toJSON().fields[0].value).toContain('ON');
       expect(initial.embeds[0].toJSON().fields[1].value).toContain('OFF');
       expect(initial.embeds[0].toJSON().fields[2].value).toContain('UNKNOWN');
+      expect(initial.components[2].toJSON().components.map((button) => button.disabled)).toEqual([
+        true,
+        true,
+        false,
+      ]);
       expect(initial.components[0].toJSON().components[0].custom_id).toBe('switch:on:1');
       await f.panel.refresh(1);
       const next = (f.message.edit.mock.calls[0] as unknown as [Payload])[0];
@@ -87,6 +92,43 @@ describe('persistent Discord control panel', () => {
     } finally {
       f.panel.stop();
       f.store.close();
+    }
+  });
+  it('coalesces repeated background updates during a slow Discord edit and drains on shutdown', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    let finish!: () => void;
+    try {
+      await f.panel.create('channel');
+      f.message.edit.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = () => resolve({});
+          }),
+      );
+      f.panel.schedule();
+      await vi.advanceTimersByTimeAsync(1200);
+      for (let i = 0; i < 100; ++i) {
+        f.panel.schedule();
+        await vi.advanceTimersByTimeAsync(1200);
+      }
+      expect(f.message.edit).toHaveBeenCalledOnce();
+      let drained = false;
+      f.panel.stop();
+      const drain = f.panel.drain().then(() => {
+        drained = true;
+      });
+      await Promise.resolve();
+      expect(drained).toBe(false);
+      finish();
+      await drain;
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(f.message.edit).toHaveBeenCalledOnce();
+      expect(f.devices.listenerCount('update')).toBe(0);
+    } finally {
+      f.panel.stop();
+      f.store.close();
+      vi.useRealTimers();
     }
   });
 });

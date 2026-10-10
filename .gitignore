@@ -13,3 +13,10 @@ rustplus.config.json
 .lock-refresh/
 .audit.json
 .audit-full.json
+.audit-review.json
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*pairing*.json
+.rustplus/

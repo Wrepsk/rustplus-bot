@@ -14,3 +14,7 @@ rustplus.config.json
 .lock-refresh
 .audit.json
 .audit-full.json
+.audit-review.json
+*.sqlite*
+*pairing*.json
+.rustplus

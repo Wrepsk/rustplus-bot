@@ -1,6 +1,6 @@
 import { Client, EmbedBuilder, escapeMarkdown } from 'discord.js';
 import type { Config } from '../config';
-import type { Store } from '../database';
+import type { Notification, Store } from '../database';
 import type { Device } from '../domain';
 import { log, errorCode } from '../log';
 
@@ -9,6 +9,7 @@ export class Alerts {
   private timer?: NodeJS.Timeout;
   private flushing?: Promise<void>;
   private stopped = false;
+  private queued = 0;
   constructor(
     private client: Client,
     private store: Store,
@@ -23,10 +24,29 @@ export class Alerts {
     }, 10000);
   }
   enqueue(device: Device): void {
+    if (this.stopped) return;
     this.store.enqueueAlarm(device.id, device.name);
-    void this.flush().then(() => {
-      if (!this.stopped && this.store.alarmJobs().length) void this.flush();
-    });
+    void this.flush()
+      .then(() => {
+        if (!this.stopped && this.store.alarmJobs().length) void this.flush();
+      })
+      .catch((error) => this.reportFailure(error));
+  }
+  notify(notification: Notification): void {
+    if (this.stopped) return;
+    this.store.enqueueNotification(notification);
+    this.wake();
+  }
+  recoveredAlarm(device: Device): void {
+    if (this.stopped || !device.enabled) return;
+    this.store.queueRecoveryWarning(
+      device,
+      `**Smart Alarm:** ${escapeMarkdown(device.name)}\n\nThis alarm was already active when monitoring resumed. The bot cannot determine when it activated or whether an actual raid occurred.`,
+    );
+    this.wake();
+  }
+  wake(): void {
+    if (!this.stopped) void this.flush();
   }
   private flush(): Promise<void> {
     if (this.flushing) return this.flushing;
@@ -35,7 +55,7 @@ export class Alerts {
       for (const job of this.store.alarmJobs()) {
         if (this.stopped) break;
         if (!this.store.devices().some((d) => d.id === job.id && d.type === 'alarm' && d.enabled)) {
-          this.store.acknowledgeAlarm(job.id);
+          this.store.acknowledgeAlarm(job.id, job.nonce);
           continue;
         }
         try {
@@ -43,11 +63,33 @@ export class Alerts {
             { id: job.id, name: job.name, type: 'alarm', enabled: true, sensitive: false },
             false,
             job.at,
+            () =>
+              this.store
+                .alarmJobs()
+                .some((current) => current.id === job.id && current.nonce === job.nonce) &&
+              this.store.devices().some((d) => d.id === job.id && d.enabled),
           );
-          this.store.acknowledgeAlarm(job.id);
+          this.store.acknowledgeAlarm(job.id, job.nonce);
         } catch (error) {
           this.reportFailure(error);
-          this.store.retryAlarm(job.id, job.attempts + 1);
+          this.store.retryAlarm(job.id, job.attempts + 1, job.nonce);
+        }
+      }
+      for (const job of this.store.notificationJobs()) {
+        if (this.stopped) break;
+        if (
+          job.alarmId &&
+          !this.store.devices().some((d) => d.id === job.alarmId && d.type === 'alarm' && d.enabled)
+        ) {
+          this.store.acknowledgeNotification(job.id);
+          continue;
+        }
+        try {
+          await this.sendNotification(job);
+          this.store.acknowledgeNotification(job.id);
+        } catch (error) {
+          this.reportFailure(error);
+          this.store.retryNotification(job.id, job.attempts + 1);
         }
       }
     })()
@@ -57,39 +99,85 @@ export class Alerts {
       });
     return this.flushing;
   }
-  send(device: Device, simulated = false, at = Date.now()): Promise<void> {
+  private serialize(work: () => Promise<void>): Promise<void> {
+    if (this.stopped) return Promise.reject(new Error('Alerts are stopping'));
+    if (this.queued >= 50) return Promise.reject(new Error('Alert delivery queue is full'));
+    ++this.queued;
     const task = this.tail
       .catch(() => {})
       .then(async () => {
-        const channelId = this.store.get('alertChannel', this.config.ALERT_CHANNEL_ID || '');
-        const role = this.store.get('alertRole', this.config.ALERT_ROLE_ID || '');
-        if (!channelId) throw new Error('Configure an alert channel with /settings alerts.');
-        const channel = await this.client.channels.fetch(channelId);
-        if (!channel || !channel.isTextBased() || !('send' in channel))
-          throw new Error('Alert channel is unavailable.');
-        await channel.send({
-          content: role ? `<@&${role}>` : undefined,
-          embeds: [
-            new EmbedBuilder()
-              .setTitle(simulated ? '🧪 SIMULATED RAID ALERT' : '🚨 RAID ALERT!')
-              .setColor(simulated ? 0xe5a742 : 0xed4245)
-              .addFields(
-                { name: 'Base', value: escapeMarkdown(this.config.BASE_NAME) },
-                { name: 'Sensor', value: escapeMarkdown(device.name) },
-                {
-                  name: 'Event',
-                  value: simulated
-                    ? 'Test notification — no in-game device was triggered.'
-                    : `Smart Alarm Activated\nObserved <t:${Math.floor(at / 1000)}:R>`,
-                },
-              )
-              .setTimestamp(at),
-          ],
-          allowedMentions: { parse: [], roles: role ? [role] : [] },
-        });
+        if (this.stopped) throw new Error('Alerts are stopping');
+        await work();
+      })
+      .finally(() => {
+        --this.queued;
       });
     this.tail = task;
     return task;
+  }
+  private async sendNotification(notification: Notification): Promise<void> {
+    return this.serialize(async () => {
+      if (
+        notification.alarmId &&
+        !this.store.devices().some((d) => d.id === notification.alarmId && d.enabled)
+      )
+        return;
+      const channelId = this.store.get('alertChannel', this.config.ALERT_CHANNEL_ID || '');
+      if (!channelId) throw new Error('Configure an alert channel with /settings alerts.');
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !channel.isTextBased() || !('send' in channel))
+        throw new Error('Alert channel is unavailable.');
+      if (this.stopped) throw new Error('Alerts are stopping');
+      if (
+        notification.alarmId &&
+        !this.store.devices().some((d) => d.id === notification.alarmId && d.enabled)
+      )
+        return;
+      // Operational/recovery warnings never masquerade as raid alerts or ping the raid role.
+      await channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle(notification.title)
+            .setDescription(notification.description)
+            .setColor(notification.title.startsWith('✅') ? 0x42b883 : 0xe5a742)
+            .setTimestamp(notification.at),
+        ],
+        allowedMentions: { parse: [] },
+      });
+    });
+  }
+  send(device: Device, simulated = false, at = Date.now(), guard?: () => boolean): Promise<void> {
+    return this.serialize(async () => {
+      if (guard && !guard()) return;
+      const channelId = this.store.get('alertChannel', this.config.ALERT_CHANNEL_ID || '');
+      const role = this.store.get('alertRole', this.config.ALERT_ROLE_ID || '');
+      if (!channelId) throw new Error('Configure an alert channel with /settings alerts.');
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !channel.isTextBased() || !('send' in channel))
+        throw new Error('Alert channel is unavailable.');
+      if (this.stopped) throw new Error('Alerts are stopping');
+      if (guard && !guard()) return;
+      await channel.send({
+        content: role ? `<@&${role}>` : undefined,
+        embeds: [
+          new EmbedBuilder()
+            .setTitle(simulated ? '🧪 SIMULATED RAID ALERT' : '🚨 RAID ALERT!')
+            .setColor(simulated ? 0xe5a742 : 0xed4245)
+            .addFields(
+              { name: 'Base', value: escapeMarkdown(this.config.BASE_NAME) },
+              { name: 'Sensor', value: escapeMarkdown(device.name) },
+              {
+                name: 'Event',
+                value: simulated
+                  ? 'Test notification — no in-game device was triggered.'
+                  : `Smart Alarm Activated\nObserved <t:${Math.floor(at / 1000)}:R>`,
+              },
+            )
+            .setTimestamp(at),
+        ],
+        allowedMentions: { parse: [], roles: role ? [role] : [] },
+      });
+    });
   }
   reportFailure(error: unknown): void {
     log.error(

@@ -1,7 +1,9 @@
 import pino from 'pino';
 // Never log protocol packets, environment values, URLs or raw upstream errors.
 export const log = pino({
-  level: process.env.LOG_LEVEL || 'info',
+  level: ['debug', 'info', 'warn', 'error'].includes(process.env.LOG_LEVEL || '')
+    ? process.env.LOG_LEVEL
+    : 'info',
   redact: ['token', 'playerToken', 'password', 'authorization'],
 });
 export function errorCode(error: unknown): string {

@@ -186,4 +186,109 @@ describe('Rust+ connection recovery', () => {
     await Promise.all([connection.queryDevice('1'), connection.queryDevice('1')]);
     expect(clients[0].requests.length - start).toBe(1);
   });
+  it('does not overwrite a newer live broadcast with an older status response', async () => {
+    const { connection, clients } = fixture();
+    await ready(connection);
+    const observed = vi.fn();
+    connection.on('device', observed);
+    let respond!: (message: RustMessage) => boolean;
+    clients[0].sendRequest = (_request, callback) => {
+      ++clients[0].seq;
+      respond = callback;
+    };
+    const query = connection.queryDevice('1');
+    await Promise.resolve();
+    await Promise.resolve();
+    clients[0].emit('message', {
+      broadcast: { entityChanged: { entityId: 1, payload: { value: true } } },
+    });
+    respond({
+      response: { seq: clients[0].seq, entityInfo: { type: 1, payload: { value: false } } },
+    });
+    await expect(query).resolves.toBe(true);
+    expect(observed.mock.calls).toEqual([['1', true, false]]);
+  });
+  it('rejects an unverified entity type before sending a switch write', async () => {
+    const { connection, clients } = fixture();
+    await ready(connection);
+    connection.forgetDevice('1');
+    clients[0].response = () => ({ entityInfo: { type: 2, payload: { value: false } } });
+    await expect(connection.setSwitch('1', true)).rejects.toThrow('access this device');
+    expect(clients[0].requests.filter((r) => r.setEntityValue)).toHaveLength(0);
+    expect(connection.unavailableDevices.map((d) => d.id)).toContain('1');
+  });
+  it('clears state on an unacknowledged write and never retries that write', async () => {
+    const { connection, clients } = fixture();
+    await ready(connection);
+    clients[0].response = () => ({});
+    const invalidated = vi.fn();
+    connection.on('deviceError', invalidated);
+    await expect(connection.setSwitch('1', true)).rejects.toThrow('invalid response');
+    expect(invalidated).toHaveBeenCalledWith('1');
+    expect(connection.unavailableDevices.map((d) => d.id)).toContain('1');
+    expect(clients[0].requests.filter((r) => r.setEntityValue)).toHaveLength(1);
+  });
+  it('timeouts an uncertain write without reporting success or retrying it after reconnect', async () => {
+    vi.useFakeTimers();
+    const { connection, clients } = fixture();
+    await ready(connection);
+    clients[0].sendRequest = (request, callback) => {
+      clients[0].requests.push(request);
+      clients[0].seqCallbacks[++clients[0].seq] = callback;
+    };
+    const invalidated = vi.fn();
+    connection.on('deviceError', invalidated);
+    const work = connection.setSwitch('1', true);
+    const rejection = expect(work).rejects.toThrow('did not respond');
+    await vi.advanceTimersByTimeAsync(10000);
+    await rejection;
+    await vi.advanceTimersByTimeAsync(1600);
+    expect(clients.flatMap((c) => c.requests).filter((r) => r.setEntityValue)).toHaveLength(1);
+    expect(connection.online).toBe(true);
+  });
+  it('reports partial initialization and automatically retries inaccessible subscriptions', async () => {
+    vi.useFakeTimers();
+    const fake = new FakeRust();
+    const normal = fake.response;
+    fake.response = (request) =>
+      request.entityId === 2 ? { error: { error: 'not_found' } } : normal(request);
+    const connection = new Connection(
+      config,
+      () => devices,
+      () => fake,
+      0,
+    );
+    connections.push(connection);
+    await ready(connection);
+    expect(connection.unavailableDevices.map((d) => d.id)).toEqual(['2']);
+    fake.response = normal;
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(connection.unavailableDevices).toEqual([]);
+  });
+  it('discards an old read response when the transport changes before it is processed', async () => {
+    vi.useFakeTimers();
+    const { connection, clients } = fixture();
+    await ready(connection);
+    const observed = vi.fn();
+    connection.on('device', observed);
+    let respond!: (message: RustMessage) => boolean;
+    clients[0].sendRequest = (_request, callback) => {
+      ++clients[0].seq;
+      respond = callback;
+    };
+    const query = connection.queryDevice('1');
+    await Promise.resolve();
+    await Promise.resolve();
+    respond({
+      response: { seq: clients[0].seq, entityInfo: { type: 1, payload: { value: true } } },
+    });
+    clients[0].emit('disconnected');
+    await expect(query).rejects.toThrow('disconnected');
+    await vi.advanceTimersByTimeAsync(1600);
+    expect(observed.mock.calls).toEqual([
+      ['1', false, true],
+      ['2', false, true],
+    ]);
+    expect(connection.unavailableDevices).toEqual([]);
+  });
 });

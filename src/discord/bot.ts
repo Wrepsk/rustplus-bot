@@ -28,6 +28,7 @@ import { log, errorCode } from '../log';
 import { Panel } from './panel';
 import { Alerts } from './alerts';
 import { commands } from './commands';
+import { ConnectionNotifications } from '../connection-notifications';
 
 interface Confirmation {
   user: string;
@@ -44,14 +45,23 @@ export class Bot {
       GatewayIntentBits.MessageContent,
     ],
     allowedMentions: { parse: [], repliedUser: false },
+    rest: { timeout: 10000, retries: 2 },
   });
   readonly devices: Devices;
   readonly permissions: Permissions;
   readonly panel: Panel;
   readonly chat: ChatBridge;
   readonly alerts: Alerts;
+  readonly connectionNotifications: ConnectionNotifications;
   private confirmations = new Map<string, Confirmation>();
   private stopping = false;
+  private tasks = new Set<Promise<unknown>>();
+  private track(task: Promise<unknown>, operation: string): void {
+    this.tasks.add(task);
+    void task
+      .catch((error) => log.warn({ code: errorCode(error), operation }, 'Discord event failed'))
+      .finally(() => this.tasks.delete(task));
+  }
   constructor(
     private config: Config,
     private store: Store,
@@ -63,17 +73,22 @@ export class Bot {
     this.devices = new Devices(store, rust, config.ALARM_COOLDOWN_SECONDS);
     this.panel = new Panel(this.client, store, this.devices);
     this.alerts = new Alerts(this.client, store, config);
+    this.connectionNotifications = new ConnectionNotifications(rust, store, this.alerts);
     this.chat = new ChatBridge(this.client, rust, store, config, this.permissions);
     this.devices.on('alarm', (device) => this.alerts.enqueue(device));
+    this.devices.on('alarmActive', (device) => {
+      try {
+        this.alerts.recoveredAlarm(device);
+      } catch (error) {
+        this.alerts.reportFailure(error);
+      }
+    });
+    rust.on('health', () => this.panel.schedule());
     this.client.on(Events.InteractionCreate, (interaction) => {
-      void this.interaction(interaction).catch((error) =>
-        log.error({ code: errorCode(error) }, 'Interaction response failed'),
-      );
+      if (!this.stopping) this.track(this.interaction(interaction), 'interaction');
     });
     this.client.on(Events.MessageCreate, (message) => {
-      void this.chat
-        .fromDiscord(message)
-        .catch((error) => log.warn({ code: errorCode(error) }, 'Chat event failed'));
+      if (!this.stopping) this.track(this.chat.fromDiscord(message), 'chat');
     });
     this.client.on(Events.Error, (error) =>
       log.error({ code: errorCode(error) }, 'Discord client error'),
@@ -82,10 +97,17 @@ export class Bot {
     this.client.on(Events.ShardDisconnect, () =>
       log.warn('Discord disconnected; gateway will reconnect'),
     );
-    this.client.on(Events.ShardResume, () => this.panel.schedule());
+    this.client.on(Events.ShardResume, () => {
+      this.panel.schedule();
+      this.alerts.wake();
+    });
+    this.client.on(Events.ShardReady, () => {
+      this.panel.schedule();
+      this.alerts.wake();
+    });
   }
   async start(): Promise<void> {
-    await new REST({ version: '10' })
+    await new REST({ version: '10', timeout: 10000, retries: 2 })
       .setToken(this.config.DISCORD_TOKEN)
       .put(
         Routes.applicationGuildCommands(
@@ -99,6 +121,7 @@ export class Bot {
       this.alerts.start();
       this.rust.start();
       this.panel.schedule();
+      this.rust.refreshHealth();
     });
     await this.client.login(this.config.DISCORD_TOKEN);
   }
@@ -238,13 +261,18 @@ export class Bot {
     }
     if (this.devices.busy.has(entityId))
       throw new UserError('A request for this switch is already running.');
-    await interaction.editReply({
-      embeds: [
-        this.embed('Updating switch…', `Reading **${escapeMarkdown(device.name)}** from Rust+.`),
-      ],
-      components: [],
-    });
-    const state = await this.devices.control(entityId, operation as 'on' | 'off' | 'refresh');
+    // Reserve the per-device lock before the first asynchronous Discord update.
+    const work = this.devices.control(entityId, operation as 'on' | 'off' | 'refresh');
+    void work.catch(() => {});
+    await interaction
+      .editReply({
+        embeds: [
+          this.embed('Updating switch…', `Reading **${escapeMarkdown(device.name)}** from Rust+.`),
+        ],
+        components: [],
+      })
+      .catch((error) => log.warn({ code: errorCode(error) }, 'Switch progress response failed'));
+    const state = await work;
     await interaction.editReply({
       embeds: [
         this.embed(
@@ -325,7 +353,10 @@ export class Bot {
         return;
       }
       try {
-        if (sub === 'remove') this.store.remove(id);
+        if (sub === 'remove') {
+          this.store.remove(id);
+          this.devices.forget(id);
+        }
         if (sub === 'rename') this.store.rename(id, options.getString('name', true));
       } catch (error) {
         throw new UserError(error instanceof Error ? error.message : 'Invalid device.');
@@ -353,6 +384,7 @@ export class Bot {
         return;
       }
       this.store.enable(id, sub === 'enable');
+      this.rust.refreshHealth();
       await reply(
         'Alarm notifications',
         `**${escapeMarkdown(device.name)}**: ${sub === 'enable' ? 'enabled' : 'disabled'}.`,
@@ -378,12 +410,13 @@ export class Bot {
       if (sub === 'alerts') {
         this.store.set('alertChannel', options.getChannel('channel', true).id);
         this.store.set('alertRole', options.getRole('role')?.id || '');
+        this.alerts.wake();
         await reply('Alerts configured', 'Use /alarm test to check notification delivery.');
         return;
       }
       if (sub === 'role-add' || sub === 'role-remove') {
         const role = options.getRole('role', true);
-        if (role.id === this.config.DISCORD_GUILD_ID)
+        if (sub === 'role-add' && role.id === this.config.DISCORD_GUILD_ID)
           throw new UserError('Choose a specific role; @everyone cannot be an operator role.');
         this.store.set(
           'allowedRoles',
@@ -404,7 +437,7 @@ export class Bot {
     if (name === 'status') {
       await reply(
         'Rust+ bot status',
-        `**Connection:** ${this.rust.state}\n**Server:** ${this.rust.info ? escapeMarkdown(this.rust.info.name).slice(0, 200) : 'Unavailable'}\n**Players:** ${this.rust.info ? `${this.rust.info.players}/${this.rust.info.maxPlayers}` : 'Unavailable'}\n**Devices:** ${this.store.devices().length}\n**Chat:** ${this.chat.status()}`,
+        `**Connection:** ${this.rust.state}\n**Last successful connection:** ${this.connectionNotifications.lastSuccessfulAt ? `<t:${Math.floor(this.connectionNotifications.lastSuccessfulAt / 1000)}:F>` : 'Not yet connected'}\n**Monitoring:** ${this.rust.online ? (this.rust.unavailableDevices.length ? `Degraded — ${this.rust.unavailableDevices.length} required device(s) unavailable` : 'Operational') : 'Unavailable'}\n**Server:** ${this.rust.info ? escapeMarkdown(this.rust.info.name).slice(0, 200) : 'Unavailable'}\n**Players:** ${this.rust.info ? `${this.rust.info.players}/${this.rust.info.maxPlayers}` : 'Unavailable'}\n**Devices:** ${this.store.devices().length}\n**Chat:** ${this.chat.status()}`,
       );
       return;
     }
@@ -437,10 +470,16 @@ export class Bot {
   }
   async stop(): Promise<void> {
     this.stopping = true;
+    this.connectionNotifications.stop();
     this.chat.stop();
     this.rust.stop();
     this.panel.stop();
-    await Promise.all([this.chat.drain(), this.alerts.stop()]);
+    await Promise.allSettled([
+      this.chat.drain(),
+      this.panel.drain(),
+      this.alerts.stop(),
+      ...this.tasks,
+    ]);
     await this.client.destroy();
   }
 }

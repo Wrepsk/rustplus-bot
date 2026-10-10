@@ -35,16 +35,25 @@ async function main(): Promise<void> {
   const bot = new Bot(config, store, rust);
   let closing = false;
   const shutdown = async (exitCode = 0) => {
+    if (exitCode) process.exitCode = exitCode;
     if (closing) return;
     closing = true;
     process.exitCode = exitCode;
     log.info('Shutting down');
-    const deadline = setTimeout(() => process.exit(exitCode), 10000);
+    const deadline = setTimeout(() => process.exit(Number(process.exitCode ?? exitCode)), 10000);
     deadline.unref();
     try {
       await bot.stop();
+    } catch (error) {
+      log.error({ code: errorCode(error) }, 'Shutdown did not complete cleanly');
+      process.exitCode = 1;
     } finally {
-      store.close();
+      try {
+        store.close();
+      } catch (error) {
+        log.error({ code: errorCode(error) }, 'Unable to close SQLite');
+        process.exitCode = 1;
+      }
     }
   };
   process.once('SIGINT', () => {

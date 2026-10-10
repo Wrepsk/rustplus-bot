@@ -18,20 +18,34 @@ interface PanelReference {
 export class Panel {
   private timer?: NodeJS.Timeout;
   private tail: Promise<unknown> = Promise.resolve();
+  private stopped = false;
+  private backgroundPending = false;
+  private dirty = false;
+  private queued = 0;
+  private onUpdate = (): void => this.schedule();
   constructor(
     private client: Client,
     private store: Store,
     private devices: Devices,
   ) {
-    devices.on('update', () => this.schedule());
+    devices.on('update', this.onUpdate);
   }
   schedule(): void {
-    if (this.timer) return;
+    if (this.stopped) return;
+    this.dirty = true;
+    if (this.timer || this.backgroundPending) return;
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      void this.refresh().catch((error) =>
-        log.warn({ code: errorCode(error) }, 'Panel refresh failed; check channel permissions'),
-      );
+      this.backgroundPending = true;
+      this.dirty = false;
+      void this.refresh()
+        .catch((error) =>
+          log.warn({ code: errorCode(error) }, 'Panel refresh failed; check channel permissions'),
+        )
+        .finally(() => {
+          this.backgroundPending = false;
+          if (this.dirty && !this.stopped) this.schedule();
+        });
     }, 1200);
   }
   private payload(page = 0) {
@@ -64,12 +78,12 @@ export class Panel {
             .setCustomId(`switch:on:${device.id}`)
             .setLabel(`${device.name.slice(0, 35)} • On`)
             .setStyle(ButtonStyle.Success)
-            .setDisabled(!this.devices.rust.online || busy),
+            .setDisabled(!this.devices.rust.online || busy || state === undefined),
           new ButtonBuilder()
             .setCustomId(`switch:off:${device.id}`)
             .setLabel('Off')
             .setStyle(ButtonStyle.Danger)
-            .setDisabled(!this.devices.rust.online || busy),
+            .setDisabled(!this.devices.rust.online || busy || state === undefined),
           new ButtonBuilder()
             .setCustomId(`switch:refresh:${device.id}`)
             .setLabel('Refresh')
@@ -96,7 +110,15 @@ export class Panel {
     return { embeds: [embed], components, allowedMentions: { parse: [] as [] } };
   }
   private serialize<T>(work: () => Promise<T>): Promise<T> {
-    const task = this.tail.catch(() => {}).then(work);
+    if (this.stopped) return Promise.reject(new Error('Panel is stopping'));
+    if (this.queued >= 20) return Promise.reject(new Error('Panel request queue is full'));
+    ++this.queued;
+    const task = this.tail
+      .catch(() => {})
+      .then(work)
+      .finally(() => {
+        --this.queued;
+      });
     this.tail = task;
     return task;
   }
@@ -140,6 +162,11 @@ export class Panel {
     return this.store.get<PanelReference | null>('panel', null)?.messageId === messageId;
   }
   stop(): void {
+    this.stopped = true;
+    this.devices.off('update', this.onUpdate);
     if (this.timer) clearTimeout(this.timer);
+  }
+  async drain(): Promise<void> {
+    await Promise.allSettled([this.tail]);
   }
 }

@@ -50,6 +50,9 @@ export class AlarmTransitions {
   reset(): void {
     this.states.clear();
   }
+  forget(id: string): void {
+    this.states.delete(id);
+  }
   sync(id: string, value: boolean): void {
     this.states.set(id, value);
   }

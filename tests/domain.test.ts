@@ -46,6 +46,12 @@ describe('Discord permissions', () => {
     roles = [];
     expect(p.operate({ ...user, roles: ['operator'] })).toBe(false);
   });
+  it('never grants access through a legacy persisted @everyone allow-list entry', () => {
+    const permissions = new Permissions('guild', 'owner', () => ['guild', 'operator']);
+    expect(permissions.operate({ ...user, roles: ['guild'] })).toBe(false);
+    expect(permissions.operate({ ...user, roles: ['guild', 'operator'] })).toBe(true);
+    expect(permissions.operate({ ...user, id: 'owner', roles: ['guild'] })).toBe(true);
+  });
 });
 describe('chat deduplication and loop prevention', () => {
   const message = { steamId: '123', name: 'Hakan', message: 'hello', time: 12345 };

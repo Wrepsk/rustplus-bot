@@ -27,6 +27,7 @@ export class RustFailure extends Error {
 export class Connection extends EventEmitter {
   state: ConnectionState = 'stopped';
   info?: RustResponse['info'];
+  lastConnectedAt?: number;
   private client?: RustClient;
   private stopped = true;
   private generation = 0;
@@ -40,6 +41,8 @@ export class Connection extends EventEmitter {
   private nextRequest = 0;
   private maintaining = false;
   private subscribed = new Set<string>();
+  private versions = new Map<string, number>();
+  private values = new Map<string, boolean>();
   private syncing = new Map<string, Promise<boolean>>();
   private sleepTimer?: NodeJS.Timeout;
   private wake?: () => void;
@@ -61,6 +64,20 @@ export class Connection extends EventEmitter {
   get online(): boolean {
     return this.state === 'connected';
   }
+  get unavailableDevices(): Device[] {
+    return this.devices().filter(
+      (d) => (d.type === 'switch' || d.enabled) && (!this.online || !this.subscribed.has(d.id)),
+    );
+  }
+  refreshHealth(): void {
+    this.emit('health');
+  }
+  forgetDevice(id: string): void {
+    this.subscribed.delete(id);
+    this.values.delete(id);
+    this.versions.delete(id);
+    this.refreshHealth();
+  }
   private status(state: ConnectionState): void {
     this.state = state;
     this.emit('status', state);
@@ -78,7 +95,13 @@ export class Connection extends EventEmitter {
     this.subscribed.clear();
     this.syncing.clear();
     this.info = undefined;
-    const client = this.factory();
+    let client: RustClient;
+    try {
+      client = this.factory();
+    } catch {
+      this.recover();
+      return;
+    }
     this.client = client;
     this.status('connecting');
     const current = () => !this.stopped && this.client === client && generation === this.generation;
@@ -111,7 +134,11 @@ export class Connection extends EventEmitter {
         this.subscribed.has(String(changed.entityId)) &&
         typeof changed.payload.value === 'boolean'
       ) {
-        this.emit('device', String(changed.entityId), changed.payload.value, false);
+        const id = String(changed.entityId);
+        if (!this.devices().some((d) => d.id === id)) return;
+        this.versions.set(id, (this.versions.get(id) ?? 0) + 1);
+        this.values.set(id, changed.payload.value);
+        this.emit('device', id, changed.payload.value, false);
       }
       if (this.online && message.broadcast?.teamMessage?.message)
         this.emit('chat', message.broadcast.teamMessage.message);
@@ -141,8 +168,10 @@ export class Connection extends EventEmitter {
     }
     if (generation !== this.generation || this.stopped) return;
     this.attempts = 0;
+    this.lastConnectedAt = Date.now();
     this.status('connected');
     this.emit('ready');
+    this.refreshHealth();
     this.heartbeat = setInterval(() => {
       void this.maintain().catch(() => {
         /* request handles connection failures */
@@ -164,6 +193,7 @@ export class Connection extends EventEmitter {
         }
     } finally {
       this.maintaining = false;
+      this.refreshHealth();
     }
   }
   private cleanup(): void {
@@ -175,6 +205,8 @@ export class Connection extends EventEmitter {
     for (const reject of [...this.pending]) reject(new RustFailure('offline'));
     this.pending.clear();
     this.subscribed.clear();
+    this.versions.clear();
+    this.values.clear();
     this.syncing.clear();
     const client = this.client;
     this.client = undefined;
@@ -212,7 +244,7 @@ export class Connection extends EventEmitter {
     this.cleanup();
     this.status('stopped');
   }
-  request(request: RustRequest, internal = false): Promise<RustResponse> {
+  request(request: RustRequest, internal = false, beforeSend?: () => void): Promise<RustResponse> {
     if (!this.online && !(internal && this.state === 'synchronizing'))
       return Promise.reject(new RustFailure('offline'));
     if (this.queueSize >= 40) return Promise.reject(new RustFailure('busy'));
@@ -235,6 +267,7 @@ export class Connection extends EventEmitter {
           this.devices().find((d) => Number(d.id) === request.entityId)?.type !== 'switch'
         )
           throw new Error('Select a registered Smart Switch.');
+        beforeSend?.(); // Session/registration checks and echo recording happen immediately before dispatch.
         this.nextRequest = Date.now() + this.paceMs * (request.sendTeamMessage ? 2 : 1);
         return this.send(this.client, request);
       })
@@ -293,8 +326,17 @@ export class Connection extends EventEmitter {
     if (existing) return existing;
     const device = this.devices().find((d) => d.id === id);
     if (!device) return Promise.reject(new Error('Device is not registered.'));
-    const task = this.request({ entityId: Number(id), getEntityInfo: {} }, internal)
+    const generation = this.generation;
+    let version = 0;
+    const task = this.request({ entityId: Number(id), getEntityInfo: {} }, internal, () => {
+      version = this.versions.get(id) ?? 0;
+    })
       .then((response) => {
+        if (
+          generation !== this.generation ||
+          !this.devices().some((d) => d.id === id && d.type === device.type)
+        )
+          throw new RustFailure('offline');
         const info = response.entityInfo;
         if (
           !info ||
@@ -303,16 +345,25 @@ export class Connection extends EventEmitter {
         )
           throw new RustFailure('device');
         this.subscribed.add(id);
+        // A live broadcast received after dispatch is newer than the response snapshot.
+        if (version !== (this.versions.get(id) ?? 0) && this.values.has(id))
+          return this.values.get(id)!;
+        this.values.set(id, info.payload.value);
         this.emit('device', id, info.payload.value, true);
+        this.refreshHealth();
         return info.payload.value;
       })
       .catch((error) => {
-        this.subscribed.delete(id);
-        this.emit('deviceError', id);
+        if (generation === this.generation) {
+          this.subscribed.delete(id);
+          this.values.delete(id);
+          this.emit('deviceError', id);
+          this.refreshHealth();
+        }
         throw error;
       })
       .finally(() => {
-        this.syncing.delete(id);
+        if (this.syncing.get(id) === task) this.syncing.delete(id);
       });
     this.syncing.set(id, task);
     return task;
@@ -320,8 +371,20 @@ export class Connection extends EventEmitter {
   async setSwitch(id: string, value: boolean): Promise<boolean> {
     if (this.devices().find((d) => d.id === id)?.type !== 'switch')
       throw new Error('Select a registered Smart Switch.');
-    const response = await this.request({ entityId: Number(id), setEntityValue: { value } });
-    if (!response.success) throw new RustFailure('protocol');
+    if (!this.subscribed.has(id)) await this.queryDevice(id);
+    const generation = this.generation;
+    try {
+      const response = await this.request({ entityId: Number(id), setEntityValue: { value } });
+      if (!response.success) throw new RustFailure('protocol');
+    } catch (error) {
+      if (generation === this.generation) {
+        this.subscribed.delete(id);
+        this.values.delete(id);
+        this.emit('deviceError', id);
+        this.refreshHealth();
+      }
+      throw error;
+    }
     return this.queryDevice(id);
   }
 }

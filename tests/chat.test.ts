@@ -16,18 +16,26 @@ class ChatRust extends EventEmitter {
     leaderSteamId: '76561198000000000',
     members: [{ steamId: '76561198000000000', name: 'ConnectedPlayer' }],
   };
-  request = vi.fn(async (request: RustRequest): Promise<RustResponse> => {
-    if (request.getTeamInfo) return { seq: 1, teamInfo: this.teamInfo };
-    if (request.getTeamChat) return { seq: 1, teamChat: { messages: this.history } };
-    if (request.sendTeamMessage)
-      this.emit('chat', {
-        steamId: '76561198000000000',
-        name: 'ConnectedPlayer',
-        message: request.sendTeamMessage.message,
-        time: 400,
-      });
-    return { seq: 1, success: {} };
-  });
+  request = vi.fn(
+    async (
+      request: RustRequest,
+      _internal = false,
+      beforeSend?: () => void,
+    ): Promise<RustResponse> => {
+      void _internal;
+      beforeSend?.();
+      if (request.getTeamInfo) return { seq: 1, teamInfo: this.teamInfo };
+      if (request.getTeamChat) return { seq: 1, teamChat: { messages: this.history } };
+      if (request.sendTeamMessage)
+        this.emit('chat', {
+          steamId: '76561198000000000',
+          name: 'ConnectedPlayer',
+          message: request.sendTeamMessage.message,
+          time: 400,
+        });
+      return { seq: 1, success: {} };
+    },
+  );
 }
 const fixtures: { bridge: ChatBridge; store: Store }[] = [];
 function fixture() {
@@ -129,9 +137,13 @@ describe('two-way chat application', () => {
     await bridge.fromDiscord(discord);
     await settle(bridge);
     expect(rust.request.mock.calls.filter(([r]) => r.sendTeamMessage)).toHaveLength(1);
-    expect(rust.request).toHaveBeenCalledWith({
-      sendTeamMessage: { message: '[Discord] Alper: Hello Rust' },
-    });
+    expect(rust.request).toHaveBeenCalledWith(
+      {
+        sendTeamMessage: { message: '[Discord] Alper: Hello Rust' },
+      },
+      false,
+      expect.any(Function),
+    );
     expect(send).not.toHaveBeenCalled();
   });
   it('rejects bots, webhooks, other channels, attachments-only messages and unauthorized users', async () => {
@@ -192,5 +204,128 @@ describe('two-way chat application', () => {
     rust.emit('chat', message);
     await settle(bridge);
     expect(store.seen(messageKey(message))).toBe(true);
+  });
+  it('deduplicates live broadcasts overlapping with history polling', async () => {
+    vi.useFakeTimers();
+    const { bridge, rust, send } = fixture();
+    await bridge.reset();
+    const message = { steamId: 'other', name: 'Hakan', message: 'overlap', time: 10 };
+    rust.history = [message];
+    rust.emit('chat', message);
+    await vi.advanceTimersByTimeAsync(30000);
+    await bridge.drain();
+    expect(send).toHaveBeenCalledOnce();
+  });
+  it('retries failed incoming delivery on later polls without losing older queued messages', async () => {
+    vi.useFakeTimers();
+    const { bridge, rust, send } = fixture();
+    await bridge.reset();
+    send.mockRejectedValueOnce(new Error('Discord disconnected'));
+    rust.history = [{ steamId: 'other', name: 'Hakan', message: 'retry me', time: 10 }];
+    await vi.advanceTimersByTimeAsync(30000);
+    await bridge.drain();
+    expect(send).toHaveBeenCalledOnce();
+    rust.history.push({ ...rust.history[0], message: 'next message', time: 11 });
+    await vi.advanceTimersByTimeAsync(30000);
+    await bridge.drain();
+    expect(send).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(30000);
+    await bridge.drain();
+    expect(send).toHaveBeenCalledTimes(3);
+  });
+  it('never echoes its reserved outgoing prefix after fingerprint expiry but allows teammates to quote it', async () => {
+    vi.useFakeTimers();
+    const { bridge, rust, send } = fixture();
+    await bridge.reset();
+    await vi.advanceTimersByTimeAsync(360000);
+    const echo = {
+      steamId: '76561198000000000',
+      name: 'ConnectedPlayer',
+      message: '[Discord] Alper: delayed echo',
+      time: 500,
+    };
+    rust.emit('chat', echo);
+    await bridge.drain();
+    expect(send).not.toHaveBeenCalled();
+    rust.emit('chat', { ...echo, steamId: 'teammate' });
+    await bridge.drain();
+    expect(send).toHaveBeenCalledOnce();
+  });
+  it('keeps outgoing order when member fetch is slow', async () => {
+    const { bridge, rust, discord, member } = fixture();
+    await bridge.reset();
+    let finish!: (member: unknown) => void;
+    const firstMessage = {
+      ...discord,
+      guild: {
+        members: {
+          fetch: () =>
+            new Promise((resolve) => {
+              finish = resolve;
+            }),
+        },
+      },
+    } as unknown as Message;
+    const first = bridge.fromDiscord(firstMessage);
+    const second = bridge.fromDiscord({ ...discord, id: 'message2', content: 'second' } as Message);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(rust.request.mock.calls.filter(([r]) => r.sendTeamMessage)).toHaveLength(0);
+    finish(member);
+    await Promise.all([first, second]);
+    expect(
+      rust.request.mock.calls.flatMap(([r]) =>
+        r.sendTeamMessage ? [r.sendTeamMessage.message] : [],
+      ),
+    ).toEqual(['[Discord] Alper: Hello Rust', '[Discord] Alper: second']);
+  });
+  it('rechecks session at actual dispatch and reports an uncertain outgoing failure without retry', async () => {
+    const { bridge, rust, discord, reply } = fixture();
+    await bridge.reset();
+    const normal = rust.request.getMockImplementation()!;
+    rust.request.mockImplementation(async (request, internal, beforeSend) => {
+      if (!request.sendTeamMessage) return normal(request, internal, beforeSend);
+      rust.online = false;
+      rust.emit('status');
+      beforeSend?.();
+      return { seq: 1, success: {} };
+    });
+    await bridge.fromDiscord(discord);
+    expect(reply).toHaveBeenCalledOnce();
+    expect(reply.mock.calls[0]).toMatchObject([
+      {
+        content: expect.stringContaining('could not confirm delivery'),
+        allowedMentions: { parse: [], repliedUser: false },
+      },
+    ]);
+    expect(rust.request.mock.calls.filter(([r]) => r.sendTeamMessage)).toHaveLength(1);
+  });
+  it('stops in-flight history sync before draining and closing the database', async () => {
+    const { bridge, rust, send } = fixture();
+    const normal = rust.request.getMockImplementation()!;
+    let finish!: (response: RustResponse) => void;
+    rust.request.mockImplementation((request, internal, beforeSend) =>
+      request.getTeamChat
+        ? new Promise((resolve) => {
+            finish = resolve;
+          })
+        : normal(request, internal, beforeSend),
+    );
+    const sync = bridge.reset();
+    await Promise.resolve();
+    await Promise.resolve();
+    bridge.stop();
+    let drained = false;
+    const drain = bridge.drain().then(() => {
+      drained = true;
+    });
+    await Promise.resolve();
+    expect(drained).toBe(false);
+    finish({
+      seq: 1,
+      teamChat: { messages: [{ steamId: 'other', name: 'Hakan', message: 'shutdown', time: 1 }] },
+    });
+    await Promise.all([sync, drain]);
+    expect(send).not.toHaveBeenCalled();
   });
 });

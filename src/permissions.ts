@@ -15,7 +15,9 @@ export class Permissions {
   }
   operate(p: Principal): boolean {
     return (
-      this.admin(p) || (p.guildId === this.guildId && p.roles.some((r) => this.roles().includes(r)))
+      this.admin(p) ||
+      (p.guildId === this.guildId &&
+        p.roles.some((r) => r !== this.guildId && this.roles().includes(r)))
     );
   }
 }
