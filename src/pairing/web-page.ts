@@ -7,24 +7,22 @@ export const page = String.raw`<!doctype html>
 <p class="intro">Link once, then pair servers and devices from the game. Your bot handles the rest.</p>
 <ol class="steps"><li id="step-1" class="current"><span>01</span><div>Open your Discord link<small>Your private, temporary pairing code</small></div></li>
 <li id="step-2"><span>02</span><div>Sign in through Steam<small>On the official Facepunch login page</small></div></li>
-<li id="step-3"><span>03</span><div>Bring back the login address<small>One copy and paste, no installation</small></div></li>
+<li id="step-3"><span>03</span><div>Return to this website<small>The extension brings back your login</small></div></li>
 <li id="step-4"><span>04</span><div>Finish in Discord<small>Paste your encrypted linking command</small></div></li></ol>
-<p class="privacy">No Steam password is entered here.<br>No app or browser extension required.</p></aside>
+<p class="privacy">No Steam password is entered here.<br>No desktop app or terminal required.</p></aside>
 <section class="card" aria-label="Account linking"><div class="card-head"><span class="dot"></span> PRIVATE PAIRING SESSION <span class="badge">15 MIN</span></div>
 <section id="begin"><h2>Let’s link your account</h2><p>Use the link from <code>/pair start</code> in Discord. If you opened this page directly, paste the pairing code below.</p>
 <label for="code">Discord pairing code</label><input id="code" autocomplete="off" spellcheck="false" placeholder="Paste your pairing code">
 <button id="prepare">Continue to Steam sign-in <span aria-hidden="true">→</span></button></section>
 <section id="login" hidden><h2>Sign in on Facepunch</h2><p>Open the official Rust companion login page below. Read its warning, continue to Steam, and finish signing in there.</p>
-<div class="notice"><strong>A “can’t connect” page is expected afterward.</strong><p>The login result returns to a <code>localhost</code> address. Nothing needs to run on your PC. Copy the <strong>entire address bar</strong> from that page and paste it below.</p></div>
+<div class="notice"><strong id="extension-status">Checking the pairing extension…</strong><p>Facepunch returns Rust+ access through an app handoff. A small browser extension brings it back here without a desktop app. It accesses only this website and Facepunch’s companion site, never your Steam password or cookies.</p></div>
+<details id="extension-install" open><summary>Install once in Chrome or Edge</summary><ol><li><a href="/pairing-extension.zip" download>Download the pairing extension ZIP</a> and extract it to a folder you will keep.</li><li>Open <code>chrome://extensions</code> (Edge: <code>edge://extensions</code>).</li><li>Enable <strong>Developer mode</strong>, click <strong>Load unpacked</strong>, and select the extracted folder containing <code>manifest.json</code>.</li><li>Refresh this website, paste your Discord code again if needed, and continue.</li></ol><p>This extension is self-hosted, not published in the browser store. A refresh after installation is required. You can remove it after importing; your VPS keeps listening.</p></details>
 <a id="steam" class="button" target="_blank" rel="noopener noreferrer">Open Steam sign-in <span aria-hidden="true">↗</span></a>
-<details><summary>Sent to the official Rust+ app page instead?</summary><p>That page is not a successful pairing result. Facepunch did not return a token to this login attempt. Reopen the exact sign-in link once; do not use the official app download link.</p>
-<label for="login-link">This attempt’s sign-in link</label><input id="login-link" readonly spellcheck="false"><button id="copy-login" class="secondary">Copy sign-in link</button>
-<p>If it still redirects there, browser pairing is unavailable for this attempt. Use the Windows desktop helper from <code>/pair start</code>, or ask the bot owner for its ZIP. Extract it, open <strong>RustPlus Pairing.cmd</strong>, and paste the code below. The helper uses a separate login method. No DNS or Nginx changes are needed.</p>
-<label for="helper-code">Discord code for the desktop helper</label><input id="helper-code" readonly spellcheck="false"><button id="copy-helper" class="secondary">Copy helper code</button>
-<p>The same 15-minute expiry applies. If expired, run <code>/pair start</code> again. Never paste Steam passwords or a raw login address into Discord.</p></details>
+<p id="login-progress" class="hint">Keep this tab open while signing in. Complete the official warning yourself; the extension never approves it for you.</p>
+<details><summary>Manual callback or redirect troubleshooting</summary><p>If Facepunch sends you to its official app page, verify the extension is enabled and this page says <strong>Extension connected</strong>. Refresh this page and sign in again from this button. A login opened independently is not linked to this tab.</p><p>If a genuine “can’t connect” localhost callback appears instead, you may paste its complete address below. Never paste that private address into Discord.</p>
 <label for="address">Address after Steam sign-in</label><textarea id="address" rows="3" autocomplete="off" spellcheck="false" placeholder="http://localhost:…/callback/…?steamId=…&amp;token=…"></textarea>
-<p class="hint">This address contains a private Rust+ token. Paste it only here, never into Discord or a message.</p>
-<button id="finish">Create Discord command <span aria-hidden="true">→</span></button></section>
+<p class="hint">A raw login token is never needed in Discord. No DNS or Nginx changes are needed for this handoff.</p></details>
+<button id="finish" disabled>Create Discord command <span aria-hidden="true">→</span></button></section>
 <section id="done" hidden><div class="success-mark" aria-hidden="true">✓</div><h2>One last step in Discord</h2><p>Copy this encrypted command and paste it into your Discord server. Only the Discord account that started this session can use it.</p>
 <label for="command">Your linking command</label><textarea id="command" rows="4" readonly spellcheck="false"></textarea><button id="copy">Copy Discord command</button>
 <div class="next"><strong>Then pair in-game</strong><p>Wait for <code>/pair status</code> to show <strong>listening</strong>. Pair the server or Smart Device in Rust, then open <code>/pair inbox</code> to accept it.</p></div></section>
@@ -40,12 +38,41 @@ export const styles = String.raw`
 export const script = String.raw`
 'use strict';
 const $ = (id) => document.getElementById(id);
-let csrf = '';
+let csrf = '', loginUrl = '', callback = '', returnedAddress = '', extensionReady = false;
+let loginTimer;
 const params = new URLSearchParams(location.hash.slice(1));
 $('code').value = params.get('code') || '';
+try {
+  $('code').value ||= sessionStorage.getItem('rust-base-code') || '';
+  if ($('code').value) sessionStorage.setItem('rust-base-code', $('code').value);
+} catch { /* Pairing also works when browser storage is unavailable. */ }
 history.replaceState(null, '', location.pathname);
 const status = (message, error = false) => { $('status').textContent = message; $('status').className = error ? 'error' : ''; };
 const step = (number) => { for (let i = 1; i <= 4; i++) $('step-' + i).classList.toggle('current', i === number); };
+const extensionStatus = () => {
+  $('extension-status').textContent = extensionReady ? 'Extension connected' : 'Install the pairing extension, then refresh this page';
+  $('extension-install').open = !extensionReady;
+};
+window.addEventListener('message', (event) => {
+  if (event.source !== window || event.origin !== location.origin) return;
+  if (event.data?.type === 'RUST_BASE_READY') { extensionReady = true; extensionStatus(); }
+  if (event.data?.type === 'RUST_BASE_ERROR') {
+    clearTimeout(loginTimer); status('Extension login failed. Reload the extension, refresh this page, and try again.', true);
+  }
+  if (event.data?.type !== 'RUST_BASE_RESULT' || typeof event.data.address !== 'string' || event.data.address.length > 12000 || !callback) return;
+  try {
+    const result = new URL(event.data.address);
+    if (result.origin + result.pathname !== callback || result.username || result.password || result.hash ||
+        result.searchParams.getAll('steamId').length !== 1 || result.searchParams.getAll('token').length !== 1 ||
+        !/^\d{17}$/.test(result.searchParams.get('steamId') || '') || !/^[A-Za-z0-9._~-]{20,10000}$/.test(result.searchParams.get('token') || '')) return;
+    returnedAddress = result.href; clearTimeout(loginTimer);
+    $('finish').disabled = false;
+    $('login-progress').textContent = 'Steam sign-in complete. Create your Discord command below.';
+    status('Login received. Click Create Discord command to finish.'); step(3);
+  } catch { /* Ignore invalid or unrelated messages; never display raw tokens. */ }
+});
+window.postMessage({ type: 'RUST_BASE_PING' }, location.origin);
+setTimeout(extensionStatus, 700);
 async function post(path, body) {
   const response = await fetch(path, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(75000) });
   const data = await response.json();
@@ -56,36 +83,42 @@ $('prepare').addEventListener('click', async () => {
   $('prepare').disabled = true; status('Preparing your private login…');
   try {
     const data = await post('/api/start', { code: $('code').value.trim() });
-    csrf = data.csrf; $('steam').href = data.loginUrl;
-    $('login-link').value = data.loginUrl; $('helper-code').value = $('code').value.trim();
+    try { sessionStorage.setItem('rust-base-code', $('code').value.trim()); } catch { /* No tokens are stored. */ }
+    csrf = data.csrf; loginUrl = data.loginUrl; callback = new URL(loginUrl).searchParams.get('returnUrl');
+    returnedAddress = ''; $('address').value = ''; $('steam').href = loginUrl; $('finish').disabled = true;
     $('begin').hidden = true; $('login').hidden = false; $('done').hidden = true;
-    $('restart').hidden = true; status(''); step(2);
+    $('restart').hidden = true; extensionStatus(); status(''); step(2);
   } catch (error) { status(error instanceof Error ? error.message : 'Connection failed.', true); }
   finally { $('prepare').disabled = false; }
 });
-$('steam').addEventListener('click', () => step(3));
-for (const [button, field, message] of [
-  ['copy-login', 'login-link', 'Sign-in link copied. Open it in a new Chrome tab and complete Facepunch’s warning yourself.'],
-  ['copy-helper', 'helper-code', 'Code copied. Paste it into the desktop pairing helper.'],
-]) $(button).addEventListener('click', async () => {
-  try { await navigator.clipboard.writeText($(field).value); status(message); }
-  catch { $(field).focus(); $(field).select(); status('Copy the selected text manually.'); }
+$('steam').addEventListener('click', (event) => {
+  event.preventDefault();
+  if (!extensionReady) { extensionStatus(); status('Install or enable the pairing extension and refresh this page first.', true); return; }
+  if (!loginUrl) return;
+  returnedAddress = ''; clearTimeout(loginTimer);
+  $('finish').disabled = true;
+  $('login-progress').textContent = 'Waiting for Steam sign-in. Finish the warning on Facepunch’s official page.';
+  window.postMessage({ type: 'RUST_BASE_START', loginUrl }, location.origin); step(3);
+  loginTimer = setTimeout(() => status('Still waiting for Facepunch. If it redirected to the official app page, reload the extension and refresh this page before trying again. No login has been received.', true), 90000);
 });
+$('address').addEventListener('input', () => { $('finish').disabled = !returnedAddress && !$('address').value.trim(); });
 $('finish').addEventListener('click', async () => {
   $('finish').disabled = true; $('restart').hidden = true; status('Registering Rust+ pairing. This can take up to a minute…');
-  const address = $('address').value.trim(); $('address').value = '';
+  const address = returnedAddress || $('address').value.trim(); returnedAddress = ''; $('address').value = '';
   try {
     const data = await post('/api/complete', { address, csrf });
     $('command').value = data.command; $('login').hidden = true; $('done').hidden = false;
+    try { sessionStorage.removeItem('rust-base-code'); } catch { /* No tokens are stored. */ }
     status('Keep this command private and use it before your Discord code expires.'); step(4);
   } catch (error) { status(error instanceof Error ? error.message : 'Connection failed.', true); $('restart').hidden = false; }
-  finally { $('finish').disabled = false; }
+  finally { $('finish').disabled = !returnedAddress && !$('address').value.trim(); }
 });
 $('copy').addEventListener('click', async () => {
   try { await navigator.clipboard.writeText($('command').value); $('copy').textContent = 'Copied — paste in Discord'; }
   catch { $('command').focus(); $('command').select(); status('Copy the selected command, then paste it into Discord.'); }
 });
 $('restart').addEventListener('click', () => {
+  returnedAddress = ''; loginUrl = ''; callback = ''; clearTimeout(loginTimer); $('address').value = '';
   $('login').hidden = true; $('begin').hidden = false; $('restart').hidden = true; status(''); step(1);
 });
 `;

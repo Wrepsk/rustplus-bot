@@ -173,8 +173,9 @@ describe('interactive pairing and management panels', () => {
     await vi.waitFor(() => expect(restore.editReply).toHaveBeenCalled());
     expect(servers.store(second).device('77').enabled).toBe(true);
   });
-  it('makes website pairing the primary no-install experience when configured', async () => {
+  it('uses website pairing with the browser extension and no desktop fallback when configured', async () => {
     config.PAIRING_WEB_URL = 'https://pair.example.org';
+    config.PAIRING_HELPER_URL = 'https://example.org/old-desktop.zip';
     const start = command('pair', 'start', {}, 'friend');
     emit(start);
     await vi.waitFor(() => expect(start.editReply).toHaveBeenCalled());
@@ -182,10 +183,9 @@ describe('interactive pairing and management panels', () => {
     expect(output(start)).toContain('https://pair.example.org/#code=');
     expect(output(start)).not.toContain('npm');
     expect(output(start)).not.toContain('RustPlus Pairing.cmd');
-    expect(output(start)).toContain('Paste this code into the helper');
+    expect(output(start)).toContain('Chrome / Edge extension');
+    expect(output(start)).not.toContain('old-desktop.zip');
     const codes = output(start).match(/[a-f0-9]{32}\.[A-Za-z0-9_-]+/g)!;
-    expect(codes.length).toBeGreaterThanOrEqual(2);
-    expect(new Set(codes).size).toBe(1);
     expect(host.pairing.isChallengeActive(codes[0])).toBe(true);
   });
   it('paginates private inboxes within Discord limits and opens a naming modal', async () => {

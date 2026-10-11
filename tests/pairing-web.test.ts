@@ -60,6 +60,17 @@ describe('self-hosted browser pairing', () => {
     expect((await post('/api/start', { code: challenge.code })).status).toBe(400);
     expect(register).not.toHaveBeenCalled();
   });
+  it('downloads an extension scoped only to this website and Facepunch without credentials', async () => {
+    const response = await fetch(`${base}/pairing-extension.zip`);
+    expect(response.headers.get('content-type')).toBe('application/zip');
+    expect(response.headers.get('content-disposition')).toContain('.zip');
+    const archive = Buffer.from(await response.arrayBuffer());
+    expect(archive.readUInt32LE()).toBe(0x04034b50);
+    expect(archive.toString()).toContain(`${origin}/*`);
+    expect(archive.toString()).not.toContain(challenge.code);
+    expect(archive.toString()).not.toContain(credentials.securityToken);
+    expect(register).not.toHaveBeenCalled();
+  });
   it('opens official Facepunch login with a nonce-bound loopback return', async () => {
     const response = await post('/api/start', { code: challenge.code });
     expect(response.headers.get('set-cookie')).toContain('HttpOnly; Secure; SameSite=Strict');
@@ -148,7 +159,7 @@ describe('self-hosted browser pairing', () => {
     expect(response.status).toBe(400);
     const body = await response.text();
     expect(body).toContain('without returning a Rust+ token');
-    expect(body).toContain('desktop helper');
+    expect(body).toContain('website pairing extension');
     expect(body).not.toContain(token);
     expect(register).not.toHaveBeenCalled();
     // The user can still finish the same session with a genuine callback.

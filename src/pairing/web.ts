@@ -5,6 +5,7 @@ import { encryptPairing } from './crypto';
 import { registerCompanion, type Registration } from './registration';
 import { page, script, styles } from './web-page';
 import { listenerSchema } from './schema';
+import { extensionZip } from './extension';
 
 interface Session {
   code: string;
@@ -38,7 +39,7 @@ export function parseSteamReturn(address: string, expected: string): string {
   if (url.origin === 'https://rust.facepunch.com' && /^\/companion\/?$/.test(url.pathname))
     throw new WebError(
       400,
-      'Facepunch redirected to the official app page without returning a Rust+ token. Reopen the exact Steam sign-in link from this pairing page once. If it happens again, use the desktop helper with your Discord pairing code. Changing DNS or Nginx will not fix this login handoff.',
+      'Facepunch redirected to the official app page without returning a Rust+ token. Install or reload the website pairing extension, refresh this page, and start a new login. Changing DNS or Nginx will not fix this login handoff.',
     );
   const callback = new URL(expected);
   if (
@@ -70,6 +71,7 @@ export class PairingWeb {
   private attempts: number[] = [];
   private stopped = false;
   private pruneTimer?: NodeJS.Timeout;
+  private archive?: Buffer;
   private server = createServer((request, response) => {
     void this.handle(request, response);
   });
@@ -148,6 +150,16 @@ export class PairingWeb {
     response.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
     try {
       if (this.stopped) throw new WebError(503, 'Pairing is restarting. Try again shortly.');
+      if (request.method === 'GET' && request.url === '/pairing-extension.zip') {
+        this.archive ??= extensionZip(this.origin);
+        response.writeHead(200, {
+          'Content-Type': 'application/zip',
+          'Content-Disposition': 'attachment; filename="Rust-Base-Pairing-Extension.zip"',
+          'Content-Length': this.archive.length,
+        });
+        response.end(this.archive);
+        return;
+      }
       const assets: Record<string, [string, string]> = {
         '/': ['text/html', page],
         '/pair.js': ['text/javascript', script],
@@ -240,7 +252,7 @@ export class PairingWeb {
         error:
           error instanceof WebError
             ? error.message
-            : 'Rust+ registration failed or timed out. Try Steam sign-in again. If it persists, ask the bot owner or use the desktop helper.',
+            : 'Rust+ registration failed or timed out. Start Steam sign-in again. If it persists, ask the bot owner to check outbound connectivity and registration services.',
       });
     }
   }
