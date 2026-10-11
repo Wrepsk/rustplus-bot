@@ -48,6 +48,56 @@ function reconnect(active: boolean) {
 const titles = () => send.mock.calls.map((call) => call[0].embeds[0].toJSON().title as string);
 
 describe('recovery warnings and persistent delivery', () => {
+  it('delivers player events from two servers into the same alerts channel with distinct server labels and no pings', async () => {
+    const secondStore = new Store(':memory:');
+    const secondAlerts = new Alerts(
+      {
+        isReady: () => ready,
+        channels: { fetch: async () => ({ isTextBased: () => true, send }) },
+      } as unknown as Client,
+      secondStore,
+      {
+        ALERT_CHANNEL_ID: 'channel',
+        ALERT_ROLE_ID: 'raid-role',
+        BASE_NAME: 'Second Server',
+      } as Config,
+    );
+    try {
+      ready = false;
+      secondAlerts.start();
+      alerts.notify({
+        id: 'online-1',
+        family: 'player:first',
+        kind: 'player-online',
+        title: '🟢 Player Online',
+        description: '@everyone is online',
+        at: Date.now(),
+      });
+      secondAlerts.notify({
+        id: 'death-1',
+        family: 'player:second',
+        kind: 'player-death',
+        title: '☠️ Rust+ Death Notification',
+        description: '@here died',
+        at: Date.now(),
+      });
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(send).not.toHaveBeenCalled();
+      ready = true;
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(
+        send.mock.calls.map(([payload]) => payload.embeds[0].toJSON().footer?.text).sort(),
+      ).toEqual(['Main Base', 'Second Server']);
+      for (const [payload] of send.mock.calls)
+        expect(payload.allowedMentions).toEqual({ parse: [] });
+      expect(store.notificationJobs()).toHaveLength(0);
+      expect(secondStore.notificationJobs()).toHaveLength(0);
+    } finally {
+      await secondAlerts.stop();
+      secondStore.close();
+    }
+  });
   it('warns on an active startup baseline without inventing a new raid or pinging roles', async () => {
     rust.emit('device', '42', true, true);
     await vi.advanceTimersByTimeAsync(10000);

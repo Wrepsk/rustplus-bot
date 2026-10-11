@@ -34,13 +34,14 @@ import { ConnectionNotifications } from '../connection-notifications';
 import type { ChatSender } from '../chat-identities';
 import { card } from './ui';
 import { Management, ManagementError } from './management';
+import { PlayerActivity } from '../activity';
 
 interface BotRuntime {
   id?: string;
   client: Client;
   sender: ChatSender;
   label: string;
-  validateChatChannel: (id: string) => void;
+  configureChatChannel: (id: string) => Promise<void>;
 }
 
 interface Confirmation {
@@ -68,6 +69,7 @@ export class Bot {
   readonly panel: Panel;
   readonly chat: ChatBridge;
   readonly alerts: Alerts;
+  readonly activity: PlayerActivity;
   readonly management: Management;
   readonly connectionNotifications: ConnectionNotifications;
   private confirmations = new Map<string, Confirmation>();
@@ -92,6 +94,7 @@ export class Bot {
     this.devices = new Devices(store, rust, config.ALARM_COOLDOWN_SECONDS);
     this.panel = new Panel(this.client, store, this.devices, runtime?.label);
     this.alerts = new Alerts(this.client, store, config);
+    this.activity = new PlayerActivity(rust, store, this.alerts, config);
     this.connectionNotifications = new ConnectionNotifications(rust, store, this.alerts);
     this.chat = new ChatBridge(this.client, rust, store, config, this.permissions, runtime?.sender);
     this.management = new Management(
@@ -157,6 +160,7 @@ export class Bot {
   }
   startServices(): void {
     this.alerts.start();
+    this.activity.start();
     this.rust.start();
     this.panel.schedule();
     this.rust.refreshHealth();
@@ -468,16 +472,19 @@ export class Bot {
     }
     if (name === 'chat') {
       if (sub === 'setup') {
-        this.runtime?.validateChatChannel(options.getChannel('channel', true).id);
-        this.store.set('chatChannel', options.getChannel('channel', true).id);
-        this.store.set('chatEnabled', true);
+        const channel = options.getChannel('channel', true).id;
+        if (this.runtime) await this.runtime.configureChatChannel(channel);
+        else {
+          this.store.set('chatChannel', channel);
+          this.store.set('chatEnabled', true);
+        }
       }
       if (sub === 'enable') {
         if (!this.chat.channelId) throw new UserError('Run /chat setup first.');
         this.store.set('chatEnabled', true);
       }
       if (sub === 'disable') this.store.set('chatEnabled', false);
-      if (sub !== 'status') void this.chat.reset();
+      if (sub !== 'status' && !(sub === 'setup' && this.runtime)) await this.chat.reset();
       await interaction.editReply(this.management.view('chat', principal.id));
       return;
     }
@@ -529,6 +536,7 @@ export class Bot {
   async stop(updatePanel = false): Promise<void> {
     this.stopping = true;
     this.connectionNotifications.stop();
+    this.activity.stop();
     this.chat.stop();
     this.rust.stop();
     if (updatePanel)
@@ -543,6 +551,7 @@ export class Bot {
     this.panel.stop();
     await Promise.allSettled([
       this.chat.drain(),
+      this.activity.drain(),
       this.panel.drain(),
       this.alerts.stop(),
       ...this.tasks,

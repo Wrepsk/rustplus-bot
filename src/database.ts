@@ -7,7 +7,13 @@ import { deviceSchema, type Device } from './domain';
 export interface Notification {
   id: string;
   family: string;
-  kind: 'connection-lost' | 'connection-restored' | 'alarm-recovery';
+  kind:
+    | 'connection-lost'
+    | 'connection-restored'
+    | 'alarm-recovery'
+    | 'player-online'
+    | 'player-offline'
+    | 'player-death';
   title: string;
   description: string;
   alarmId?: string;
@@ -171,6 +177,31 @@ export class Store {
     this.db
       .prepare('INSERT INTO notification_outbox (id,family,payload) VALUES (?,?,?)')
       .run(notification.id, notification.family, JSON.stringify(notification));
+  }
+  queuePlayerNotification(
+    notification: Notification,
+    wireKey: string | undefined,
+    fingerprint: string,
+  ): boolean {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const recent = this.db
+        .prepare('SELECT 1 FROM chat_seen WHERE key=? AND at>=?')
+        .get(fingerprint, Date.now() - 30000);
+      if ((wireKey && this.seen(wireKey)) || recent) {
+        if (wireKey) this.markSeen(wireKey);
+        this.db.exec('COMMIT');
+        return false;
+      }
+      this.enqueueNotification(notification);
+      if (wireKey) this.markSeen(wireKey);
+      this.markSeen(fingerprint);
+      this.db.exec('COMMIT');
+      return true;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
   notificationJobs(): (Notification & { attempts: number })[] {
     // Preserve lost -> restored order even when the lost notification is backing off.

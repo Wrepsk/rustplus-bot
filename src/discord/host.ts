@@ -25,6 +25,7 @@ import { PairingService } from '../pairing/service';
 import { log, errorCode } from '../log';
 import { PairingWeb } from '../pairing/web';
 import { button, card, inboxView, pairingModal, pairingStatus, serversView } from './ui';
+import type { DeathPush } from '../pairing/schema';
 
 type HostComponent = ButtonInteraction | ModalSubmitInteraction | StringSelectMenuInteraction;
 
@@ -46,7 +47,9 @@ export class DiscordHost {
     private config: Config,
     readonly servers: Servers,
   ) {
-    this.pairing = new PairingService(servers.root, servers.vault);
+    this.pairing = new PairingService(servers.root, servers.vault, (owner, event) =>
+      this.death(owner, event),
+    );
     if (config.PAIRING_WEB_URL)
       this.web = new PairingWeb(config.PAIRING_WEB_URL, (code) =>
         this.pairing.isChallengeActive(code),
@@ -93,18 +96,36 @@ export class DiscordHost {
       id,
       sender: identities,
       label: this.servers.get(id).name,
-      validateChatChannel: (channel) => {
-        if (
-          this.servers
-            .list()
-            .some((p) => p.id !== id && this.servers.store(p.id).get('chatChannel', '') === channel)
-        )
-          throw new HostError('Each Rust server needs a different Discord team-chat channel.');
-      },
+      configureChatChannel: (channel) => this.configureChatChannel(id, channel),
     });
     const session = { bot, rust, identities };
     this.sessions.set(id, session);
     return session;
+  }
+  private configureChatChannel(id: string, channel: string): Promise<void> {
+    return this.serialize(async () => {
+      const affected = [id];
+      for (const profile of this.servers.list()) {
+        if (profile.id === id) continue;
+        const store = this.servers.store(profile.id);
+        if (store.get('chatChannel', '') !== channel) continue;
+        store.set('chatEnabled', false);
+        store.set('chatChannel', '');
+        affected.push(profile.id);
+      }
+      this.servers.store(id).set('chatChannel', channel);
+      this.servers.store(id).set('chatEnabled', true);
+      // reset() invalidates queued sends immediately, before its first await.
+      await Promise.all(affected.map((server) => this.sessions.get(server)?.bot.chat.reset()));
+    });
+  }
+  private death(owner: string, event: DeathPush): void {
+    if (this.stopping) return;
+    const profile = this.servers.match(event.ip, event.port);
+    if (!profile?.enabled) return;
+    const identity = this.servers.identity(profile.id, owner);
+    if (!identity) return; // Only accepted personal pairings may report to this server.
+    this.sessions.get(profile.id)?.bot.activity.death(owner, identity.playerId, event);
   }
   private async restart(id: string): Promise<void> {
     const previous = this.sessions.get(id);

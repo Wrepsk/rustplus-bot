@@ -17,7 +17,8 @@ export interface RustResponse {
   teamChat?: { messages: TeamMessage[] };
   teamInfo?: {
     leaderSteamId: { toString(): string };
-    members: { steamId: { toString(): string }; name: string }[];
+    // AppTeamInfo.Member fields verified in the installed rustplus.proto.
+    members: { steamId: { toString(): string }; name: string; isOnline?: boolean }[];
   };
 }
 export interface RustMessage {

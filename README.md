@@ -107,11 +107,23 @@ Enabled profiles run simultaneously, each with independent devices, subscription
 /panel server:<server-id>
 ```
 
-Configure operator roles per server with `/settings role-add role:@Operators server:<id>`. Commands accept an optional `server` ID. Otherwise a dedicated chat/panel channel selects its server; elsewhere your personal, persistent `/server use` selection applies. Panel buttons always target the server belonging to their saved message. Use distinct panel channels and **distinct chat channels**; duplicate chat channels are rejected.
+Configure operator roles per server with `/settings role-add role:@Operators server:<id>`. Commands accept an optional `server` ID. Otherwise a dedicated chat/panel channel selects its server; elsewhere your personal, persistent `/server use` selection applies. Panel buttons always target the server belonging to their saved message. Use distinct panel channels. **Alert channels may be shared:** run `/settings alerts channel:#alerts server:<id>` for each server; notification footers identify the server.
+
+Each chat channel belongs to one server at a time. Administrator `/chat setup channel:#rust-chat server:<new-server-id>` **transfers** an occupied channel to that server, disables the previous bridge and clears its channel assignment. Pending old-bridge sends are invalidated; a request already sent to Rust cannot be recalled. Use the explicit `server` option when transferring an occupied channel, because its existing assignment otherwise selects the previous server. Run `/chat setup` again to give the previous server a different channel before enabling it.
 
 `/server pause server:<id>` and `/server resume server:<id>` affect only that server. Fresh pairing by an administrator for the existing monitoring Steam identity refreshes its token without replacing devices. A friend's pairing links personal chat and does not replace the monitoring account. Use these commands to switch servers instead of changing the original environment variables. Up to 10 server profiles and 50 paired users are supported.
 
 Every chat author needs their **own Rust+ server pairing**, not just Steam OpenID or a Steam ID. Messages use their player ID/token and retain the `[Discord] DisplayName:` prefix. Personal connections open on demand, reuse existing sockets, and close after 60 seconds idle. At most three additional personal connections per server run alongside monitoring, below the upstream documented default of five per source IP/server, assuming no other automation or alternate-hostname profiles share that endpoint. Stricter server limits may require fewer active users. Uncertain sends are not retried automatically; rejected personal credentials pause until a new pairing. `/pair unlink` removes your listener and personal chat credentials across servers; shared monitoring remains configured. An explicitly unlinked administrator is not automatically relinked on restart.
+
+### Player online/offline and death notices
+
+The configured alert channel also receives **Player Online**, **Player Offline** and **Rust+ Death Notification** embeds, with the server name in the footer. These notices do not ping the raid role. No new environment variables or browser-extension update are needed.
+
+Online/offline monitoring covers players visible in the monitoring account's Rust team, independently of whether chat is enabled. It combines live `teamChanged` broadcasts with a 30-second `getTeamInfo` poll using the protocol's `isOnline` field. The first snapshot after startup/reconnect is a silent baseline; joining/leaving the team does not fabricate login/logout events. Activity during a monitoring gap is not reconstructed.
+
+Offline death notifications are forwarded from actual Rust+ **player/death FCM pushes**, not inferred from a body or an alarm. The affected player must link their own account through `/pair start` and accept that server pairing; `/pair status` must show a listening push registration. The bot routes the push to that accepted server's alert channel even when its Rust WebSocket is disconnected. Push delivery may be delayed or unavailable upstream, so these are reports rather than exact death timestamps or confirmed raids. Unlinked players' deaths are unavailable. Paused servers do not forward them.
+
+Push IDs are deduplicated persistently across restarts, with a 30-second fingerprint fallback for multiple registrations of the same Steam account. Identical reports within that window coalesce. Discord failures use the existing persistent notification outbox and retries; delivery is at-least-once. Wire-format references: [Rust+ team protocol](https://github.com/liamcottle/rustplus.js/blob/master/rustplus.proto), [Rust+ push documentation](https://github.com/liamcottle/rustplus.js/blob/master/docs/API.md) and [Rust++ FCM event handling](https://github.com/alexemanuelol/rustplusplus/blob/master/src/util/FcmListener.js).
 
 ## Before you start
 
@@ -202,7 +214,7 @@ Optional settings:
 | `PAIRING_WEB_HOST` / `PAIRING_WEB_PORT` | `127.0.0.1` / `3080`; web Compose override binds container 0.0.0.0 behind host loopback |
 | `PAIRING_HELPER_URL`                    | Optional HTTPS download of the desktop helper ZIP; website fallback                     |
 
-Settings changed through Discord are saved in SQLite and override the corresponding **initial** environment role/alert defaults. The database is bound to the Rust server and player identity to prevent accidental control of unrelated entities when changing servers. Use a separate database/volume for a different server or Steam account.
+Settings changed through Discord are saved in SQLite and override the corresponding **initial** environment role/alert defaults. Each server database is bound to its Rust server and monitoring player identity to prevent accidental control of unrelated entities. Add other servers through pairing/server profiles; the bot manages their separate databases in the same data volume.
 
 ## 5. First-time Discord setup
 

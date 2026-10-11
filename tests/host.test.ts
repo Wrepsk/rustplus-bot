@@ -8,6 +8,9 @@ import { Servers } from '../src/servers';
 import { Store } from '../src/database';
 import { Connection } from '../src/rust/connection';
 import type { Config } from '../src/config';
+import { PairingListener } from '../src/pairing/listener';
+import { encryptPairing } from '../src/pairing/crypto';
+import { PlayerActivity } from '../src/activity';
 
 let directory: string, store: Store, servers: Servers, host: DiscordHost, second: string;
 let config: Config;
@@ -440,12 +443,91 @@ describe('one Discord client hosting multiple Rust servers', () => {
     expect(output(pause)).toContain('Administrator');
     expect(servers.get('default').enabled).toBe(true);
   });
-  it('prevents assigning the same chat channel to two servers', async () => {
+  it('transfers an occupied chat channel and disables its former server bridge', async () => {
+    store.set('chatEnabled', true);
     const setup = command('chat', 'setup', { server: second, channel: 'main-chat' });
     emit(setup);
     await vi.waitFor(() => expect(setup.editReply).toHaveBeenCalled());
-    expect(output(setup)).toContain('different Discord');
+    expect(output(setup)).not.toContain('different Discord');
+    expect(servers.store(second).get('chatChannel', '')).toBe('main-chat');
+    expect(servers.store(second).get('chatEnabled', false)).toBe(true);
+    expect(store.get('chatChannel', '')).toBe('');
+    expect(store.get('chatEnabled', true)).toBe(false);
+    const reenable = command('chat', 'enable', { server: 'default' });
+    emit(reenable);
+    await vi.waitFor(() => expect(reenable.editReply).toHaveBeenCalled());
+    expect(output(reenable)).toContain('setup first');
+  });
+  it('does not allow an operator to override a channel without administrator permission', async () => {
+    const setup = command('chat', 'setup', { server: second, channel: 'main-chat' }, 'friend');
+    emit(setup);
+    await vi.waitFor(() => expect(setup.editReply).toHaveBeenCalled());
+    expect(output(setup)).toContain('administrator');
+    expect(store.get('chatChannel', '')).toBe('main-chat');
     expect(servers.store(second).get('chatChannel', '')).toBe('second-chat');
+  });
+  it('allows two servers to configure the same alert channel independently', async () => {
+    const main = command('settings', 'alerts', { server: 'default', channel: 'shared-alerts' });
+    const other = command('settings', 'alerts', { server: second, channel: 'shared-alerts' });
+    emit(main);
+    emit(other);
+    await vi.waitFor(() => expect(main.editReply).toHaveBeenCalled());
+    await vi.waitFor(() => expect(other.editReply).toHaveBeenCalled());
+    expect(store.get('alertChannel', '')).toBe('shared-alerts');
+    expect(servers.store(second).get('alertChannel', '')).toBe('shared-alerts');
+  });
+  it('serializes competing chat overrides so only one server owns the channel', async () => {
+    const main = command('chat', 'setup', { server: 'default', channel: 'shared-chat' });
+    const other = command('chat', 'setup', { server: second, channel: 'shared-chat' });
+    emit(main);
+    emit(other);
+    await vi.waitFor(() => expect(main.editReply).toHaveBeenCalled());
+    await vi.waitFor(() => expect(other.editReply).toHaveBeenCalled());
+    const owners = servers
+      .list()
+      .filter(
+        (profile) => servers.store(profile.id).get<string>('chatChannel', '') === 'shared-chat',
+      );
+    expect(owners).toHaveLength(1);
+    expect(
+      servers.list().filter((profile) => servers.store(profile.id).get('chatEnabled', false)),
+    ).toHaveLength(1);
+  });
+  it('routes FCM death reports only to the matching server with an accepted personal identity', async () => {
+    const listeners: PairingListener[] = [];
+    vi.spyOn(PairingListener.prototype, 'connect').mockImplementation(function (
+      this: PairingListener,
+    ) {
+      listeners.push(this);
+      return Promise.resolve();
+    });
+    const notify = vi.spyOn(PlayerActivity.prototype, 'death').mockReturnValue(true);
+    servers.link(second, 'friend', { playerId: '76561198000000002', playerToken: '789' });
+    const code = host.pairing.challenge('friend');
+    host.pairing.import('friend', encryptPairing(code, { androidId: '123', securityToken: '456' }));
+    const listener = listeners[0];
+    const wire = (ip: string, port: number, id: string) => ({
+      persistentId: id,
+      appData: [
+        { key: 'channelId', value: 'player' },
+        { key: 'title', value: 'You died' },
+        {
+          key: 'body',
+          value: JSON.stringify({ type: 'death', ip, port, targetId: '76561198000000009' }),
+        },
+      ],
+    });
+    listener._onDataMessage(wire(secondPairing.ip, secondPairing.port, 'second-death'));
+    expect(notify).toHaveBeenCalledWith(
+      'friend',
+      '76561198000000002',
+      expect.objectContaining({ title: 'You died' }),
+    );
+    listener._onDataMessage(wire(config.RUST_SERVER_IP, config.RUST_APP_PORT, 'not-linked'));
+    listener._onDataMessage(wire('unknown.example.org', 1234, 'unknown-server'));
+    servers.enable(second, false);
+    listener._onDataMessage(wire(secondPairing.ip, secondPairing.port, 'paused-server'));
+    expect(notify).toHaveBeenCalledOnce();
   });
   it('links a personal pairing without changing the server monitoring account', async () => {
     host.pairing.receive('friend', {

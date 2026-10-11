@@ -10,9 +10,14 @@ const Upstream = upstreamRequire('@liamcottle/push-receiver/src/client') as {
 const listeners: PairingListener[] = [];
 function fixture() {
   const receive = vi.fn(),
-    listener = new PairingListener({ androidId: '123', securityToken: '456' }, receive);
+    receiveDeath = vi.fn(),
+    listener = new PairingListener(
+      { androidId: '123', securityToken: '456' },
+      receive,
+      receiveDeath,
+    );
   listeners.push(listener);
-  return { listener, receive };
+  return { listener, receive, receiveDeath };
 }
 afterEach(() => {
   for (const listener of listeners.splice(0)) listener.destroy();
@@ -20,6 +25,30 @@ afterEach(() => {
   vi.useRealTimers();
 });
 describe('persistent FCM pairing listener lifecycle', () => {
+  it('forwards validated death pushes separately from pairings and deduplicates before dispatch', () => {
+    const { listener, receive, receiveDeath } = fixture();
+    const wire = {
+      persistentId: 'death-1',
+      appData: [
+        { key: 'channelId', value: 'player' },
+        { key: 'title', value: 'You died' },
+        {
+          key: 'body',
+          value: JSON.stringify({ type: 'death', ip: 'rust.example.org', port: 28082 }),
+        },
+      ],
+    };
+    listener._onDataMessage(wire);
+    listener._onDataMessage(wire);
+    expect(receive).not.toHaveBeenCalled();
+    expect(receiveDeath).toHaveBeenCalledOnce();
+    expect(receiveDeath).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'You died', port: 28082 }),
+    );
+    listener.destroy();
+    listener._onDataMessage({ ...wire, persistentId: 'later-death' });
+    expect(receiveDeath).toHaveBeenCalledOnce();
+  });
   it('recovers a half-open push socket when heartbeat acknowledgements stop', async () => {
     vi.useFakeTimers();
     const { listener } = fixture();

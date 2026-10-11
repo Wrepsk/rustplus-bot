@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import { dirname, join } from 'node:path';
 import type { TLSSocket } from 'node:tls';
 import type { ListenerCredentials, Pairing } from './schema';
-import { parsePairing } from './schema';
+import { parsePairing, parseDeathPush, type DeathPush } from './schema';
 import { log } from '../log';
 
 interface PushClient extends EventEmitter {
@@ -40,6 +40,7 @@ export class PairingListener extends Upstream {
   constructor(
     private credentials: ListenerCredentials,
     private receive: (pairing: Pairing) => void,
+    private receiveDeath?: (event: DeathPush) => void,
   ) {
     super(credentials.androidId, credentials.securityToken, []);
     this.on('ON_DATA_RECEIVED', (data: unknown) => {
@@ -49,6 +50,14 @@ export class PairingListener extends Upstream {
           this.receive(pairing);
         } catch {
           log.warn('Could not save pairing notification');
+        }
+      }
+      const death = parseDeathPush(data);
+      if (death && !this.stopped) {
+        try {
+          this.receiveDeath?.(death);
+        } catch {
+          log.warn('Could not save Rust+ death notification');
         }
       }
     });

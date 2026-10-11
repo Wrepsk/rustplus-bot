@@ -39,6 +39,42 @@ export const pairingSchema = z.discriminatedUnion('type', [
 ]);
 export type Pairing = z.infer<typeof pairingSchema>;
 
+const deathPushSchema = z.object({ type: z.literal('death'), ...endpoint });
+export interface DeathPush {
+  ip: string;
+  port: number;
+  title: string;
+  message: string;
+  persistentId?: string;
+}
+// Verified Rust+ push channel: player / body.type=death. targetId is NOT
+// assumed to be the victim; the receiving linked account identifies the player.
+export function parseDeathPush(input: unknown): DeathPush | null {
+  try {
+    const raw = z
+      .object({
+        persistentId: z.string().min(1).max(200).optional(),
+        appData: z
+          .array(z.object({ key: z.string().max(100), value: z.string().max(16384) }))
+          .max(50),
+      })
+      .parse(input);
+    const data = Object.fromEntries(raw.appData.map((entry) => [entry.key, entry.value]));
+    if (data.channelId !== 'player' || !data.body) return null;
+    const body = deathPushSchema.parse(JSON.parse(data.body));
+    if ((data.title?.length || 0) > 256 || (data.message?.length || 0) > 1024) return null;
+    return {
+      ip: body.ip,
+      port: body.port,
+      title: data.title || '',
+      message: data.message || '',
+      persistentId: raw.persistentId,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // FCM's appData contains string key/value pairs; body is itself JSON.
 export function parsePairing(input: unknown): Pairing | null {
   try {

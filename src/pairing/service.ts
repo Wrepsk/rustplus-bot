@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { Store } from '../database';
 import { CredentialVault, decryptPairing, pairingChallenge } from './crypto';
-import { listenerSchema, pairingSchema, type Pairing } from './schema';
+import { listenerSchema, pairingSchema, type Pairing, type DeathPush } from './schema';
 import { PairingListener } from './listener';
 
 interface Session {
@@ -23,6 +23,7 @@ export class PairingService {
   constructor(
     private store: Store,
     private vault: CredentialVault,
+    private receiveDeath?: (owner: string, event: DeathPush) => void,
   ) {}
   start(): void {
     for (const user of this.store.get<string[]>('pairingUsers', [])) this.listen(user);
@@ -68,7 +69,11 @@ export class PairingService {
     if (!encrypted) return;
     const credentials = listenerSchema.parse(this.vault.decrypt(encrypted, `fcm:${user}`));
     this.listeners.get(user)?.destroy();
-    const listener = new PairingListener(credentials, (pairing) => this.receive(user, pairing));
+    const listener = new PairingListener(
+      credentials,
+      (pairing) => this.receive(user, pairing),
+      (event) => this.receiveDeath?.(user, event),
+    );
     this.listeners.set(user, listener);
     void listener.connect();
   }

@@ -172,7 +172,15 @@ export class Alerts {
           card(notification.title)
             .setFooter({ text: this.config.BASE_NAME })
             .setDescription(notification.description)
-            .setColor(notification.title.startsWith('✅') ? 0x42b883 : 0xe5a742)
+            .setColor(
+              notification.kind === 'player-death'
+                ? 0xed4245
+                : notification.kind === 'player-offline'
+                  ? 0x747f8d
+                  : notification.kind === 'player-online' || notification.title.startsWith('✅')
+                    ? 0x42b883
+                    : 0xe5a742,
+            )
             .setTimestamp(notification.at),
         ],
         allowedMentions: { parse: [] },
