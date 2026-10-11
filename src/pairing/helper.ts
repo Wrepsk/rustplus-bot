@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { encryptPairing } from './crypto';
 import { listenerSchema } from './schema';
@@ -8,11 +8,13 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   let code = '',
     path = resolve('rustplus.config.json'),
-    register = false;
+    register = false,
+    minimalConfig = false;
   for (let i = 0; i < args.length; ++i) {
     if (args[i] === '--code') code = args[++i] || '';
     else if (args[i] === '--config') path = resolve(args[++i] || 'rustplus.config.json');
     else if (args[i] === '--register') register = true;
+    else if (args[i] === '--minimal-config') minimalConfig = true;
     else throw new Error('Usage: npm run pair -- --code CODE [--config FILE] [--register]');
   }
   if (!code) throw new Error('Run /pair start in Discord and copy its helper command first.');
@@ -52,6 +54,10 @@ async function main(): Promise<void> {
   }
   const raw = JSON.parse(readFileSync(path, 'utf8')) as { fcm_credentials?: { gcm?: unknown } };
   const credentials = listenerSchema.parse(raw.fcm_credentials?.gcm);
+  // The desktop helper needs only the listener credentials after registration.
+  // Keep the original CLI file intact unless this explicit flag is supplied.
+  if (minimalConfig)
+    writeFileSync(path, JSON.stringify({ fcm_credentials: { gcm: credentials } }), { mode: 0o600 });
   console.log('\nPaste this encrypted command into Discord (it contains no plaintext tokens):\n');
   console.log(`/pair import data:${encryptPairing(code, credentials)}`);
   console.log(

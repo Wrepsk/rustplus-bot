@@ -8,6 +8,7 @@
   },
   "scripts": {
     "pair": "tsx src/pairing/helper.ts",
+    "package:pairing": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-pairing.ps1",
     "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",

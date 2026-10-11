@@ -1,0 +1,30 @@
+RUST+ DISCORD PAIRING - WINDOWS 10/11 (64-bit)
+
+1. Extract ALL files from this ZIP. Do not run the helper inside the ZIP viewer.
+2. Double-click RustPlus Pairing.cmd. No installation or administrator access needed.
+3. Run /pair start in Discord and paste its code into the helper.
+4. Click Link account. Sign in on Steam's page in the Chrome window.
+5. Click Copy Discord command, paste into Discord, and send it.
+6. Wait for /pair status to say listening, then close the helper.
+7. In Rust, use Pair with Server (or Pair on a smart device).
+8. Run /pair inbox and accept your pairing in Discord.
+
+Google Chrome and an internet connection are required. Node.js is included.
+The first sign-in can take a few minutes. Codes expire after 15 minutes; get a new
+code with /pair start if necessary. If linking fails, check Chrome/popups and
+internet access. If a VPN or firewall is blocking the login, try without it.
+If another pairing helper is open, close it first (the login uses local port 3000).
+
+To switch Steam accounts or repair an invalid registration, check "Sign in again"
+before linking. Pair the server again after changing Steam accounts.
+If local credentials are damaged, click Reset local registration, then link again.
+Resetting locally does NOT unlink the bot; use /pair unlink in Discord for that.
+
+Only the encrypted /pair import command belongs in Discord. Never upload the local
+registration file or share Steam passwords/Steam Guard codes. Steam sign-in happens
+in a separate Chrome profile through the upstream rustplus.js pairing process.
+Close that Chrome window when finished; do not use it for unrelated browsing.
+
+Local listener credentials: %LOCALAPPDATA%\RustPlusDiscordPairing\rustplus.config.json
+The bot keeps listening on the VPS; this helper does not need to stay running.
+This ZIP includes the Node.js license and third-party dependency licenses.

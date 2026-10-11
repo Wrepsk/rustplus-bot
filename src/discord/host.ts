@@ -2,6 +2,9 @@ import {
   Client,
   Events,
   EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   MessageFlags,
   REST,
   Routes,
@@ -169,6 +172,7 @@ export class DiscordHost {
     interaction: ChatInputCommandInteraction,
     title: string,
     description: string,
+    downloadUrl?: string,
   ): Promise<void> {
     await interaction.editReply({
       embeds: [
@@ -178,6 +182,16 @@ export class DiscordHost {
           .setColor(0xce6f3e),
       ],
       allowedMentions: { parse: [] },
+      components: downloadUrl
+        ? [
+            new ActionRowBuilder<ButtonBuilder>().addComponents(
+              new ButtonBuilder()
+                .setLabel('Download Windows pairing helper')
+                .setStyle(ButtonStyle.Link)
+                .setURL(downloadUrl),
+            ),
+          ]
+        : [],
     });
   }
   private async interaction(interaction: Interaction): Promise<void> {
@@ -274,9 +288,15 @@ export class DiscordHost {
         await this.reply(
           interaction,
           'Link Rust+ from your PC',
-          'On your own PC, in this project folder, install dependencies (`npm ci`) and run:\n' +
-            `\`\`\`\nnpm run pair -- --code ${code}\n\`\`\`\n` +
-            'Chrome opens for Steam sign-in if needed. Paste the encrypted `/pair import` command it prints here. This code expires in 15 minutes. Then pair the server/devices in-game and use `/pair inbox`. Never paste a Steam password or a raw pairing file into Discord.',
+          (this.config.PAIRING_HELPER_URL
+            ? '1. Download the Windows helper using the button below. **Extract all** files from the ZIP.\n'
+            : '1. Ask the server owner for the **Windows pairing helper ZIP** and extract all files. The owner has not configured a download link yet.\n') +
+            '2. Double-click **RustPlus Pairing.cmd**. No Node.js installation or project download is needed. Google Chrome must be installed.\n' +
+            '3. Paste this code into the helper and click **Link account**:\n' +
+            `\`\`\`\n${code}\n\`\`\`\n` +
+            '4. Sign in through Steam in the Chrome window. Click **Copy Discord command** in the helper, then paste it here.\n\n' +
+            'This code expires in **15 minutes**. Wait for `/pair status` to show **listening**, pair your server/devices in-game, then use `/pair inbox`. You can close the helper afterward. Never paste a Steam password or raw pairing file into Discord.',
+          this.config.PAIRING_HELPER_URL,
         );
       } else if (sub === 'import') {
         try {

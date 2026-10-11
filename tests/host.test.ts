@@ -10,6 +10,7 @@ import { Connection } from '../src/rust/connection';
 import type { Config } from '../src/config';
 
 let directory: string, store: Store, servers: Servers, host: DiscordHost, second: string;
+let config: Config;
 let role: string[];
 const secondPairing = {
   type: 'server',
@@ -22,7 +23,7 @@ const secondPairing = {
 beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), 'rust-host-test-'));
   store = new Store(join(directory, 'bot.sqlite'));
-  const config = {
+  config = {
     DATABASE_PATH: join(directory, 'bot.sqlite'),
     BASE_NAME: 'Main',
     RUST_SERVER_IP: 'rust.example.org',
@@ -113,6 +114,29 @@ function output(interaction: ReturnType<typeof command>) {
   return interaction.editReply.mock.calls.map(([payload]) => JSON.stringify(payload)).join('\n');
 }
 describe('one Discord client hosting multiple Rust servers', () => {
+  it('gives friends a portable download and code instead of developer setup commands', async () => {
+    config.PAIRING_HELPER_URL = 'https://example.org/RustPlus-Pairing-Windows-x64.zip';
+    const start = command('pair', 'start', {}, 'friend');
+    emit(start);
+    await vi.waitFor(() => expect(start.editReply).toHaveBeenCalled());
+    const response = output(start);
+    expect(response).toContain('RustPlus Pairing.cmd');
+    expect(response).toContain('Extract all');
+    expect(response).toContain('Copy Discord command');
+    expect(response).toContain(config.PAIRING_HELPER_URL);
+    expect(response).not.toContain('npm');
+    expect(response).not.toContain('project folder');
+    expect(start.deferReply).toHaveBeenCalledWith({ flags: 64 });
+  });
+  it('does not give a broken download link when the owner has not published the helper', async () => {
+    const start = command('pair', 'start', {}, 'friend');
+    emit(start);
+    await vi.waitFor(() => expect(start.editReply).toHaveBeenCalled());
+    expect(output(start)).toContain('Ask the server owner');
+    expect(output(start)).not.toContain('npm');
+    const response = start.editReply.mock.calls[0][0] as { components: unknown[] };
+    expect(response.components).toEqual([]);
+  });
   it('ignores legacy @everyone operator entries for pairing commands', async () => {
     store.set('allowedRoles', ['guild']);
     servers.store(second).set('allowedRoles', ['guild']);

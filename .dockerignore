@@ -20,3 +20,7 @@ rustplus.config.json
 .rustplus
 credentials.key
 *.credentials.key
+artifacts
+desktop
+scripts
+.github

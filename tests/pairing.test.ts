@@ -68,31 +68,45 @@ const pairing = {
 };
 
 describe('encrypted Discord pairing', () => {
-  it('runs the actual local helper against a synthetic registration and exports only encrypted data', async () => {
-    const { path } = fixture();
-    const challenge = pairingChallenge();
-    const registration = join(path, 'test-pairing.json');
-    writeFileSync(registration, JSON.stringify({ fcm_credentials: { gcm: listener } }), {
-      mode: 0o600,
-    });
-    const { stdout } = await promisify(execFile)(
-      process.execPath,
-      [
-        '--import',
-        'tsx',
-        join(process.cwd(), 'src', 'pairing', 'helper.ts'),
-        '--code',
-        challenge.code,
-        '--config',
+  it.each([false, true])(
+    'exports encrypted data from the actual helper (minimal config: %s)',
+    async (minimal) => {
+      const { path } = fixture();
+      const challenge = pairingChallenge();
+      const registration = join(path, 'test-pairing.json');
+      writeFileSync(
         registration,
-      ],
-      { timeout: 10000 },
-    );
-    const data = /\/pair import data:([\w.-]+)/.exec(stdout)?.[1];
-    expect(data).toBeTruthy();
-    expect(decryptPairing(challenge.privateKey, data!)).toEqual(listener);
-    expect(stdout).not.toContain(listener.securityToken);
-  });
+        JSON.stringify({
+          fcm_credentials: { gcm: listener, fcm: { token: 'unused-test-fcm' } },
+          rustplus_auth_token: 'unused-test-auth',
+        }),
+        { mode: 0o600 },
+      );
+      const { stdout } = await promisify(execFile)(
+        process.execPath,
+        [
+          '--import',
+          'tsx',
+          join(process.cwd(), 'src', 'pairing', 'helper.ts'),
+          '--code',
+          challenge.code,
+          '--config',
+          registration,
+          ...(minimal ? ['--minimal-config'] : []),
+        ],
+        { timeout: 10000 },
+      );
+      const data = /\/pair import data:([\w.-]+)/.exec(stdout)?.[1];
+      expect(data).toBeTruthy();
+      expect(decryptPairing(challenge.privateKey, data!)).toEqual(listener);
+      expect(stdout).not.toContain(listener.securityToken);
+      const stored = JSON.parse(readFileSync(registration, 'utf8'));
+      expect(stored.fcm_credentials.gcm).toEqual(listener);
+      if (minimal) expect(stored).toEqual({ fcm_credentials: { gcm: listener } });
+      else expect(stored.rustplus_auth_token).toBe('unused-test-auth');
+      expect(stdout).not.toContain('unused-test-auth');
+    },
+  );
   it('round trips without exposing plaintext credentials and rejects tampering/wrong keys', () => {
     const challenge = pairingChallenge(),
       other = pairingChallenge();

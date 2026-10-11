@@ -8,14 +8,41 @@ Your current `.env`, SQLite registrations, alerts, roles and panel IDs continue 
 
 Back up the **entire** data volume before upgrading, then rebuild/recreate the image. The first run creates `/app/data/credentials.key` (local: beside `DATABASE_PATH`) and additional databases in `servers/` beside the original database. Newly imported server, FCM and personal player credentials are encrypted with this key. Keep the key with private backups: losing it makes saved credentials unreadable. Steam passwords, Steam Guard codes, cookies and the upstream companion auth token are never transferred to the bot. Existing `.env` secrets remain in `.env`.
 
-1. Run `/pair start` in Discord. It returns a private helper command valid for 15 minutes.
-2. On **your PC**, install Node 22.13+ and Chrome, clone/download this project, run `npm ci`, then paste that command: `npm run pair -- --code <code-from-discord>`. No Discord `.env` is needed on a friend's PC. Existing `rustplus.config.json` is reused. Use `--config <path>` for a custom file, or `--register` to repeat registration.
-3. If needed, Chrome opens the upstream Rust Companion/Steam login flow. Log in on Steam's page. The helper prints one encrypted `/pair import data:…` command; paste it into Discord. Only encrypted credential data travels through Discord. Raw tokens are not printed by the helper.
+1. Run `/pair start` in Discord. It returns a private pairing code valid for 15 minutes and a **Download Windows pairing helper** button when the owner has configured its download URL.
+2. Download the helper ZIP, choose **Extract all**, open the extracted folder and double-click **RustPlus Pairing.cmd**. Your friends do **not** need this repository, Node.js, npm, a terminal, a Discord bot token or administrator access. Windows 10/11 x64 and Google Chrome are required; Node.js and dependencies are included in the ZIP.
+3. Paste the Discord code into the helper and click **Link account**. If needed, Chrome opens the upstream Rust Companion/Steam login flow. Log in on Steam's page. Click **Copy Discord command**, paste into Discord and send. Only encrypted credential data travels through Discord. Raw tokens are not displayed by the helper.
 4. Close any local `fcm-listen` using that registration. The **VPS** now keeps the FCM listener running, including after restarts. Check `/pair status` for `listening` before pairing in-game. Allow outbound TCP **5228** to `mtalk.google.com` and outbound HTTPS as appropriate; no inbound VPS ports are required.
 5. In Rust, click **Pair with Server**. Run `/pair inbox`, then `/pair accept id:<pairing-id>`. Administrators can add monitored servers; operators can link only to existing servers. Chat checks that your Steam account belongs to the mirrored Rust team before dispatch.
 6. For a Smart Switch/Alarm, use **Pair** on the device in-game, then `/pair inbox` and `/pair accept id:<pairing-id> name:Garage`. Devices require administrator approval. Set `sensitive:true` for destructive equipment. Pairing only registers/queries the device; it never activates it. Existing registrations are retained; rename them with `/device rename`.
 
-This removes the recurring need to run `fcm-listen` or copy raw IDs/tokens. Browser sign-in and the in-game Pair action remain necessary. The helper exits after import. If FCM reports `invalid-credentials`, repeat `/pair start` with `--register`. Inbox pairings are private, deduplicated and expire after 24 hours.
+This removes the recurring need to run `fcm-listen` or copy raw IDs/tokens. Browser sign-in and the in-game Pair action remain necessary. Close the helper after import. If FCM reports `invalid-credentials` or you want another Steam account, get a new `/pair start` code and check **Sign in again** in the helper. Inbox pairings are private, deduplicated and expire after 24 hours. The helper stores only the local FCM listener registration in `%LOCALAPPDATA%\RustPlusDiscordPairing\rustplus.config.json` after a successful run; **Reset local registration** removes that file. Use `/pair unlink` to remove credentials on the bot as well.
+
+### Owner: provide the Windows download once
+
+The portable ZIP is built separately from the VPS bot image. Building/distributing it is the owner's job, not something every friend needs to do.
+
+On your Windows development PC, run:
+
+```powershell
+npm ci
+npm run package:pairing
+```
+
+This builds `artifacts/RustPlus-Pairing-Windows-x64.zip` and its `.sha256` checksum. It downloads the official Node 22.23.3 Windows runtime, verifies its official SHA-256, installs production dependencies from the lockfile into an isolated staging folder, and tests the **bundled runtime, upstream CLI loading, Windows UI and encrypted export with synthetic credentials**. No local `.env`, SQLite data, credential keys or real registration files are copied. The downloaded runtime cache stays in ignored `artifacts/cache/`. The package includes dependency licenses and the Node license. No new runtime dependencies are introduced.
+
+Alternatively, after pushing these files, open GitHub **Actions → Pairing Helper → Run workflow**. Download the finished workflow artifact, extract that outer artifact ZIP and take the **inner** `RustPlus-Pairing-Windows-x64.zip`. The workflow builds/tests but does not automatically publish a release.
+
+Upload the helper ZIP to a GitHub Release or another HTTPS download location your friends can access. If the repository/release is private, friends need access; an Actions artifact alone is not a permanent public download. Set this in the VPS `.env`:
+
+```dotenv
+PAIRING_HELPER_URL=https://github.com/YOUR-OWNER/YOUR-REPO/releases/download/YOUR-TAG/RustPlus-Pairing-Windows-x64.zip
+```
+
+Use the actual published file URL, not GitHub's source-code ZIP. Rebuild/update the bot and recreate it with `docker compose up -d --build --force-recreate rust-bot`. `/pair start` now shows the download button. The URL is optional: without it, the bot asks friends to get the helper ZIP from the owner rather than displaying an unavailable link. You can share the same built ZIP directly instead, if your file-sharing destination supports its size. There is no hosted login website or inbound VPS port.
+
+The desktop helper reuses the installed rustplus.js registration CLI. Its packaged copy binds the temporary port-3000 login callback to loopback and uses chrome-launcher's isolated temporary browser profile rather than upstream's hardcoded Unix profile path. The upstream login flow relaxes browser security for that dedicated Chrome session; use it only for pairing and close it when finished. Raw upstream stdout/stderr are suppressed. Failed or cancelled sign-in gets a visible error/timeout, and closing the helper stops its registration process tree. Windows organization policies that forbid PowerShell scripts may block this portable helper; use a personal PC where scripts are permitted. It needs no elevation.
+
+Developer/Linux/macOS fallback is still available from this repository: `npm ci`, then `npm run pair -- --code <code-from-discord>`. It accepts `--config <path>` and `--register` and preserves the original CLI registration file by default. This fallback is not required for Windows friends using the portable helper.
 
 ### Multiple servers without restarting the bot
 
