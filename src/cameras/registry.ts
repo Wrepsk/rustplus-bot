@@ -67,8 +67,8 @@ export function movement(
   const look: Record<string, [number, number]> = {
     'look-left': [-5, 0],
     'look-right': [5, 0],
-    'look-up': [0, -5],
-    'look-down': [0, 5],
+    'look-up': [0, 5],
+    'look-down': [0, -5],
   };
   if (Object.hasOwn(flight, action) && flags & 1 && (!['up', 'down'].includes(action) || flags & 4))
     input.buttons = flight[action];

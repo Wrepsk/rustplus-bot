@@ -97,6 +97,12 @@ it('holds WASD combinations, ignores key repeat and releases on key-up and focus
 });
 it('maps WASD to look for stationary cameras; supports drone vertical keys and lease heartbeats', async () => {
   const camera = await viewer(2);
+  await camera.key('keydown', 'KeyW');
+  expect(camera.inputs().at(-1)?.actions).toEqual(['look-up']);
+  await camera.key('keyup', 'KeyW');
+  await camera.key('keydown', 'KeyS');
+  expect(camera.inputs().at(-1)?.actions).toEqual(['look-down']);
+  await camera.key('keyup', 'KeyS');
   await camera.key('keydown', 'KeyA');
   expect(camera.inputs().at(-1)?.actions).toEqual(['look-left']);
   await camera.key('keyup', 'KeyA');

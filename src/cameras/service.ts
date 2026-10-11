@@ -384,6 +384,7 @@ export class Cameras {
           request.cameraInput.mouseDelta.x ||
           request.cameraInput.mouseDelta.y
         );
+        s.renderer?.motion(s.inputNonzero);
       })
       .then((response) => {
         if (!response.success) throw new RustFailure('protocol');
@@ -414,17 +415,22 @@ export class Cameras {
     try {
       // A single short movement pulse, followed by neutral input at the normal request pace.
       // No held movement queue and no retries of uncertain state-changing requests.
-      const guard = () => {
+      const guard = (active: boolean) => () => {
         this.guard(s);
         if (s.verified < Date.now() - 15000) throw new CameraError('Account verification expired.');
+        s.renderer?.motion(active);
       };
-      const result = await s.rust.request({ cameraInput: input }, false, guard);
+      const result = await s.rust.request(
+        { cameraInput: input },
+        false,
+        guard(action !== 'release'),
+      );
       if (!result.success) throw new RustFailure('protocol');
       if (action !== 'release') {
         const released = await s.rust.request(
           { cameraInput: movement('release', 0) },
           false,
-          guard,
+          guard(false),
         );
         if (!released.success) throw new RustFailure('protocol');
       }

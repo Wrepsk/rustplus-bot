@@ -1,24 +1,30 @@
 import { Worker } from 'node:worker_threads';
 import type { CameraInfo, CameraRays } from '../rust/protocol';
+import { RayImage } from './ray-image';
 
-// Use the installed library's verified decoder, isolated from alarms/chat on the main event loop.
-// Its public Camera lifecycle creates async intervals/listeners; only its pure PNG renderer is used.
+// Keep decoding/PNG work isolated from alarms and chat. Serialize our self-contained,
+// tested codec so workers work both from TypeScript tests and compiled production files.
 const source = `
 const {parentPort, workerData} = require('node:worker_threads');
-const Camera = require(workerData.module);
-// PNG encoding is for live frames, not archival compression. Worker-local only.
 const {createRequire} = require('node:module');
 const Jimp = createRequire(workerData.module)('jimp');
-Jimp.prototype._deflateLevel = 1;
-parentPort.on('message', async ({frames, width, height}) => {
+// esbuild uses this name helper in test transforms; production TypeScript needs none.
+const __name = value => value;
+const RayImage = (${RayImage.toString()});
+const image = new RayImage(workerData.width, workerData.height);
+parentPort.on('message', async ({frames, motion}) => {
   try {
-    const png = await Camera.prototype._renderCameraFrame(frames, width, height);
+    if (motion) { image.motion(motion.active, motion.at); return; }
+    for (const frame of frames) image.add(frame, frame.at);
+    const bitmap = image.render(Date.now());
+    const png = await new Jimp({data:Buffer.from(bitmap.data), width:bitmap.width, height:bitmap.height}).deflateLevel(1).getBufferAsync(Jimp.MIME_PNG);
     parentPort.postMessage({png});
   } catch { parentPort.postMessage({error:true}); }
 });`;
 export class CameraRenderer {
   private worker?: Worker;
-  private frames: CameraRays[] = [];
+  private frames: (CameraRays & { at: number })[] = [];
+  private pendingBytes = 0;
   private busy = false;
   private lastRender = 0;
   private timer?: NodeJS.Timeout;
@@ -26,7 +32,7 @@ export class CameraRenderer {
   private dirty = false;
   private stopped = false;
   constructor(
-    private info: CameraInfo,
+    info: CameraInfo,
     private output: (png: Buffer) => void,
     private failed: () => void,
   ) {
@@ -41,7 +47,11 @@ export class CameraRenderer {
       throw new Error('Unsupported camera dimensions.');
     this.worker = new Worker(source, {
       eval: true,
-      workerData: { module: require.resolve('@liamcottle/rustplus.js/camera') },
+      workerData: {
+        module: require.resolve('@liamcottle/rustplus.js/camera'),
+        width: info.width,
+        height: info.height,
+      },
       resourceLimits: { maxOldGenerationSizeMb: 96 },
     });
     this.worker.on('message', (result: { png?: Uint8Array; error?: boolean }) => {
@@ -72,10 +82,17 @@ export class CameraRenderer {
       this.fail();
       return;
     }
-    this.frames.push({ sampleOffset: frame.sampleOffset, rayData: frame.rayData });
-    if (this.frames.length > 10) this.frames.shift();
+    this.frames.push({ sampleOffset: frame.sampleOffset, rayData: frame.rayData, at: Date.now() });
+    this.pendingBytes += frame.rayData.byteLength;
+    // Queue only undecoded packets. The worker retains a fixed per-pixel cache,
+    // rather than throwing away image coverage each time ten packets roll over.
+    while (this.frames.length > 64 || this.pendingBytes > 1048576)
+      this.pendingBytes -= this.frames.shift()!.rayData.byteLength;
     this.dirty = true;
     this.schedule();
+  }
+  motion(active: boolean): void {
+    if (!this.stopped) this.worker?.postMessage({ motion: { active, at: Date.now() } });
   }
   private schedule(): void {
     if (this.stopped || this.busy || this.scheduled || !this.dirty) return;
@@ -93,9 +110,9 @@ export class CameraRenderer {
     this.timer = setTimeout(() => this.fail(), 5000);
     this.worker?.postMessage({
       frames: this.frames,
-      width: this.info.width,
-      height: this.info.height,
     });
+    this.frames = [];
+    this.pendingBytes = 0;
   }
   private fail(): void {
     if (!this.stopped) {

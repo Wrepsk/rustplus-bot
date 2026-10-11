@@ -11,6 +11,7 @@ import type { RustRequest, RustResponse } from '../src/rust/protocol';
 import { Cameras, offlineMember } from '../src/cameras/service';
 import { CameraRegistry, movement, heldMovement } from '../src/cameras/registry';
 
+const motionCalls = vi.hoisted(() => vi.fn());
 vi.mock('../src/cameras/renderer', () => ({
   CameraRenderer: class {
     constructor(
@@ -21,6 +22,7 @@ vi.mock('../src/cameras/renderer', () => ({
       this.output(Buffer.from('frame'));
     }
     stop() {}
+    motion = motionCalls;
   },
 }));
 const steam = '76561198000000000',
@@ -59,6 +61,7 @@ class FakeConnection extends EventEmitter {
   }
 }
 beforeEach(() => {
+  motionCalls.mockClear();
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-10-11T00:00:00Z'));
   directory = mkdtempSync(join(tmpdir(), 'rust-camera-'));
@@ -129,6 +132,8 @@ describe('camera registrations and controls', () => {
     expect(() => movement('look-left', 1)).toThrow();
     expect(() => movement('down', 1)).toThrow();
     expect(movement('look-left', 2).mouseDelta).toEqual({ x: -5, y: 0 });
+    expect(movement('look-up', 2).mouseDelta).toEqual({ x: 0, y: 5 });
+    expect(movement('look-down', 2).mouseDelta).toEqual({ x: 0, y: -5 });
     expect(() => movement('up', 1)).toThrow();
     expect(movement('up', 7).buttons).toBe(128);
     expect(movement('release', 0).buttons).toBe(0);
@@ -209,6 +214,7 @@ describe('camera session authorization and lifecycle', () => {
       r.cameraInput ? [r.cameraInput.buttons] : [],
     );
     expect(inputs).toEqual([2, 0]);
+    expect(motionCalls.mock.calls.map(([active]) => active)).toEqual([true, false]);
   });
   it('does not retry failed movement and closes the session', async () => {
     const id = await open();
@@ -233,6 +239,7 @@ describe('camera session authorization and lifecycle', () => {
         r.cameraInput ? [r.cameraInput.buttons] : [],
       );
     expect(inputs()).toEqual([18, 0]);
+    expect(motionCalls.mock.calls.map(([active]) => active)).toEqual([true, false]);
     cameras.hold(id, ['left'], 4);
     await vi.advanceTimersByTimeAsync(1500);
     expect(inputs()).toEqual([18, 0, 8, 0]);
