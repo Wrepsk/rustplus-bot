@@ -26,7 +26,7 @@ import { ChatBridge } from '../chat';
 import { needsConfirmation, deviceSchema } from '../domain';
 import { log, errorCode } from '../log';
 import { Panel } from './panel';
-import { Alerts } from './alerts';
+import { Alerts, AlertDeliveryError } from './alerts';
 import { commands } from './commands';
 import { ConnectionNotifications } from '../connection-notifications';
 
@@ -162,7 +162,9 @@ export class Bot {
       await this.command(interaction, principal);
     } catch (error) {
       const safe =
-        error instanceof RustFailure || error instanceof UserError
+        error instanceof RustFailure ||
+        error instanceof UserError ||
+        error instanceof AlertDeliveryError
           ? error.message
           : 'The request failed. Check configuration, channel permissions and logs, then retry.';
       log.warn(

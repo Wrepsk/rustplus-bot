@@ -21,21 +21,25 @@ export function createRustClient(config: Config): RustClient {
     try {
       const messageType = client.AppMessage;
       const root = messageType.root;
-      // Upstream issues #76/#81 and PR #82: these default-valued fields can be absent.
-      // Keep all other schema requirements, request fields and entity type IDs intact.
-      for (const [typeName, fieldName] of [
-        ['rustplus.AppInfo', 'queuedPlayers'],
-        ['rustplus.AppTeamInfo.Note', 'type'],
-      ]) {
+      // Rust omits default-valued metadata (upstream PR #77 / issues #76 and #81).
+      // Apply defaults to the data our bot consumes, retaining identity/text fields,
+      // response correlation, request requirements, entity types and payload presence.
+      const metadataTypes: [string, string[]][] = [
+        ['rustplus.AppInfo', ['name']],
+        ['rustplus.AppTeamInfo.Member', ['steamId', 'name']],
+        ['rustplus.AppTeamInfo.Note', []],
+        ['rustplus.AppTeamMessage', ['steamId', 'name', 'message']],
+      ];
+      for (const [typeName, required] of metadataTypes) {
         const type = root.lookupType(typeName);
-        const field = type.fields[fieldName];
-        if (!field) throw new ProtocolDecodeFailure();
-        if (!field.required) continue;
-        const replacement = protobuf.Field.fromJSON(field.name, {
-          ...field.toJSON(),
-          rule: 'optional',
-        });
-        type.remove(field).add(replacement);
+        for (const field of [...type.fieldsArray]) {
+          if (!field.required || required.includes(field.name)) continue;
+          const replacement = protobuf.Field.fromJSON(field.name, {
+            ...field.toJSON(),
+            rule: 'optional',
+          });
+          type.remove(field).add(replacement);
+        }
       }
       root.resolveAll();
       messageType.setup();

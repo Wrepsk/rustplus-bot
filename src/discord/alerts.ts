@@ -4,6 +4,29 @@ import type { Notification, Store } from '../database';
 import type { Device } from '../domain';
 import { log, errorCode } from '../log';
 
+export class AlertDeliveryError extends Error {
+  constructor(
+    readonly code:
+      | 'ALERT_CHANNEL_MISSING'
+      | 'ALERT_CHANNEL_UNAVAILABLE'
+      | 'ALERT_MISSING_ACCESS'
+      | 'ALERT_MISSING_PERMISSIONS',
+  ) {
+    super(
+      {
+        ALERT_CHANNEL_MISSING:
+          'No alert channel is configured. Run /settings alerts channel:#raid-alerts, then retry /alarm test.',
+        ALERT_CHANNEL_UNAVAILABLE:
+          'The alert channel is unavailable or is not a supported text channel. Select an existing text channel with /settings alerts.',
+        ALERT_MISSING_ACCESS:
+          'Discord denied access to the alert channel. Allow the bot to View Channel, then run /settings alerts with that channel.',
+        ALERT_MISSING_PERMISSIONS:
+          'The bot is missing permissions in the alert channel. Allow View Channel, Send Messages and Embed Links, then retry /alarm test.',
+      }[code],
+    );
+  }
+}
+
 export class Alerts {
   private tail: Promise<unknown> = Promise.resolve();
   private timer?: NodeJS.Timeout;
@@ -109,6 +132,15 @@ export class Alerts {
         if (this.stopped) throw new Error('Alerts are stopping');
         await work();
       })
+      .catch((error: unknown) => {
+        // Discord's documented numeric codes are safe to translate; never expose raw API errors.
+        if (typeof error === 'object' && error !== null && 'code' in error) {
+          if (error.code === 10003) throw new AlertDeliveryError('ALERT_CHANNEL_UNAVAILABLE');
+          if (error.code === 50001) throw new AlertDeliveryError('ALERT_MISSING_ACCESS');
+          if (error.code === 50013) throw new AlertDeliveryError('ALERT_MISSING_PERMISSIONS');
+        }
+        throw error;
+      })
       .finally(() => {
         --this.queued;
       });
@@ -123,10 +155,10 @@ export class Alerts {
       )
         return;
       const channelId = this.store.get('alertChannel', this.config.ALERT_CHANNEL_ID || '');
-      if (!channelId) throw new Error('Configure an alert channel with /settings alerts.');
+      if (!channelId) throw new AlertDeliveryError('ALERT_CHANNEL_MISSING');
       const channel = await this.client.channels.fetch(channelId);
       if (!channel || !channel.isTextBased() || !('send' in channel))
-        throw new Error('Alert channel is unavailable.');
+        throw new AlertDeliveryError('ALERT_CHANNEL_UNAVAILABLE');
       if (this.stopped) throw new Error('Alerts are stopping');
       if (
         notification.alarmId &&
@@ -151,10 +183,10 @@ export class Alerts {
       if (guard && !guard()) return;
       const channelId = this.store.get('alertChannel', this.config.ALERT_CHANNEL_ID || '');
       const role = this.store.get('alertRole', this.config.ALERT_ROLE_ID || '');
-      if (!channelId) throw new Error('Configure an alert channel with /settings alerts.');
+      if (!channelId) throw new AlertDeliveryError('ALERT_CHANNEL_MISSING');
       const channel = await this.client.channels.fetch(channelId);
       if (!channel || !channel.isTextBased() || !('send' in channel))
-        throw new Error('Alert channel is unavailable.');
+        throw new AlertDeliveryError('ALERT_CHANNEL_UNAVAILABLE');
       if (this.stopped) throw new Error('Alerts are stopping');
       if (guard && !guard()) return;
       await channel.send({

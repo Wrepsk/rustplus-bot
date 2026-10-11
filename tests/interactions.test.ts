@@ -56,6 +56,7 @@ beforeEach(() => {
       ADMIN_USER_ID: 'owner',
       ALLOWED_ROLE_IDS: ['operator'],
       ALARM_COOLDOWN_SECONDS: 60,
+      BASE_NAME: 'Main Base',
     } as Config,
     store,
     rust as unknown as Connection,
@@ -181,5 +182,94 @@ describe('server-side persistent button authorization', () => {
     emit(expired);
     await vi.waitFor(() => expect(expired.editReply).toHaveBeenCalled());
     expect(setSwitch).not.toHaveBeenCalled();
+  });
+});
+
+describe('alarm test delivery diagnostics', () => {
+  function alarmTest(user = 'owner') {
+    const interaction = Object.assign(button('', user), {
+      commandName: 'alarm',
+      isChatInputCommand: () => true,
+      isButton: () => false,
+      options: { getSubcommand: () => 'test', getString: () => '42' },
+    });
+    store.add({ id: '42', name: 'Outer Wall', type: 'alarm' });
+    emit(interaction);
+    return interaction;
+  }
+  function description(interaction: ReturnType<typeof alarmTest>) {
+    const payload = interaction.editReply.mock.calls[0][0] as {
+      embeds: { toJSON(): { description: string } }[];
+    };
+    return payload.embeds[0].toJSON().description;
+  }
+  it('explains how to configure a missing alert channel', async () => {
+    const fetch = vi.spyOn(bot.client.channels, 'fetch');
+    const interaction = alarmTest();
+    await vi.waitFor(() => expect(interaction.editReply).toHaveBeenCalled());
+    expect(description(interaction)).toContain('/settings alerts channel:#raid-alerts');
+    expect(fetch).not.toHaveBeenCalled();
+    expect(setSwitch).not.toHaveBeenCalled();
+  });
+  it.each([
+    [10003, '/settings alerts'],
+    [50001, 'View Channel'],
+    [50013, 'Embed Links'],
+  ])(
+    'explains Discord channel lookup error %s without revealing raw errors',
+    async (code, expected) => {
+      store.set('alertChannel', 'channel');
+      vi.spyOn(bot.client.channels, 'fetch').mockRejectedValue({ code, message: 'secret-token' });
+      const interaction = alarmTest();
+      await vi.waitFor(() => expect(interaction.editReply).toHaveBeenCalled());
+      expect(description(interaction)).toContain(expected);
+      expect(description(interaction)).not.toContain('secret-token');
+    },
+  );
+  it('explains a rejected send and does not report success', async () => {
+    store.set('alertChannel', 'channel');
+    const send = vi.fn().mockRejectedValue({ code: 50013, message: 'secret-token' });
+    vi.spyOn(bot.client.channels, 'fetch').mockResolvedValue({
+      isTextBased: () => true,
+      send,
+    } as never);
+    const interaction = alarmTest();
+    await vi.waitFor(() => expect(interaction.editReply).toHaveBeenCalled());
+    expect(send).toHaveBeenCalledOnce();
+    expect(description(interaction)).toContain('Send Messages');
+    expect(description(interaction)).not.toContain('secret-token');
+    expect(setSwitch).not.toHaveBeenCalled();
+  });
+  it('keeps unknown API errors private', async () => {
+    store.set('alertChannel', 'channel');
+    vi.spyOn(bot.client.channels, 'fetch').mockRejectedValue({
+      code: 12345,
+      message: 'secret-token',
+    });
+    const interaction = alarmTest();
+    await vi.waitFor(() => expect(interaction.editReply).toHaveBeenCalled());
+    expect(description(interaction)).toContain('The request failed');
+    expect(description(interaction)).not.toContain('secret-token');
+  });
+  it('sends a simulated alert and confirms successful delivery', async () => {
+    store.set('alertChannel', 'channel');
+    const send = vi.fn().mockResolvedValue({});
+    vi.spyOn(bot.client.channels, 'fetch').mockResolvedValue({
+      isTextBased: () => true,
+      send,
+    } as never);
+    const interaction = alarmTest();
+    await vi.waitFor(() => expect(interaction.editReply).toHaveBeenCalled());
+    expect(send).toHaveBeenCalledOnce();
+    expect(send.mock.calls[0][0].embeds[0].toJSON().title).toContain('SIMULATED');
+    expect(description(interaction)).toBe('No Rust device was triggered.');
+    expect(setSwitch).not.toHaveBeenCalled();
+  });
+  it('still enforces administrator authorization', async () => {
+    const fetch = vi.spyOn(bot.client.channels, 'fetch');
+    const interaction = alarmTest('friend');
+    await vi.waitFor(() => expect(interaction.editReply).toHaveBeenCalled());
+    expect(description(interaction)).toContain('administrator');
+    expect(fetch).not.toHaveBeenCalled();
   });
 });
