@@ -7,6 +7,8 @@ export class RayImage {
   private positions: Uint32Array;
   private colours: Uint8ClampedArray;
   private sampled: Float64Array;
+  private depths: Uint16Array;
+  private materials: Uint16Array;
   private latest = 0;
   private epoch = -Infinity;
   private moving = false;
@@ -43,6 +45,8 @@ export class RayImage {
     }
     this.colours = new Uint8ClampedArray(count * 4);
     this.sampled = new Float64Array(count).fill(-Infinity);
+    this.depths = new Uint16Array(count);
+    this.materials = new Uint16Array(count);
   }
   motion(active: boolean, now: number): void {
     if (active !== this.moving) {
@@ -123,6 +127,8 @@ export class RayImage {
         this.colours[pixel + 3] = 255;
       }
       this.sampled[index] = now;
+      this.depths[index] = Math.max(0, Math.min(1023, distance));
+      this.materials[index] = material;
     }
   }
   render(
@@ -130,39 +136,26 @@ export class RayImage {
     reconstruct = true,
   ): { width: number; height: number; data: Uint8ClampedArray; mode: 'pose' | 'spatial' } {
     if (this.moving && now >= this.motionUntil) this.motion(false, now);
-    // During motion use only recent rays and a 2x2 reconstruction grid. This trades
-    // detail for coverage rather than mixing sharp samples from several old viewpoints.
-    const scale = reconstruct && this.moving ? 2 : 1;
-    const width = Math.ceil(this.width / scale),
-      height = Math.ceil(this.height / scale),
+    // Keep fresh observed pixels at native detail. Reconstruct only missing pixels;
+    // averaging 2x2 blocks and then enlarging blurred even fully sampled views.
+    const width = this.width,
+      height = this.height,
       count = width * height;
     const data = new Uint8ClampedArray(count * 4);
     const nearest = new Int32Array(count).fill(-1),
       distance = new Uint8Array(count).fill(255);
     const cutoff = this.moving ? Math.max(now - 300, this.latest - 150) : -Infinity;
-    for (let y = 0; y < height; y++)
-      for (let x = 0; x < width; x++) {
-        const target = y * width + x,
-          sums = [0, 0, 0];
-        let samples = 0;
-        for (let dy = 0; dy < scale && y * scale + dy < this.height; dy++)
-          for (let dx = 0; dx < scale && x * scale + dx < this.width; dx++) {
-            const source = (y * scale + dy) * this.width + x * scale + dx;
-            if (this.sampled[source] === -Infinity || this.sampled[source] < cutoff) continue;
-            for (let c = 0; c < 3; c++) sums[c] += this.colours[source * 4 + c];
-            samples++;
-          }
-        if (!samples) continue;
-        for (let c = 0; c < 3; c++) data[target * 4 + c] = Math.floor(sums[c] / samples);
-        data[target * 4 + 3] = 255;
-        nearest[target] = target;
-        distance[target] = 0;
-      }
+    for (let i = 0; i < count; i++) {
+      if (this.sampled[i] === -Infinity || this.sampled[i] < cutoff) continue;
+      data.set(this.colours.subarray(i * 4, i * 4 + 4), i * 4);
+      nearest[i] = i;
+      distance[i] = 0;
+    }
     if (reconstruct) {
       // Bounded spatial hole filling in two linear passes. Real sampled pixels, including
       // genuine black surfaces, are never replaced. No full-image guessed background.
       const propagate = (to: number, from: number) => {
-        if (distance[from] < (this.moving ? 8 : 3) && distance[from] + 1 < distance[to]) {
+        if (distance[from] < (this.moving ? 16 : 3) && distance[from] + 1 < distance[to]) {
           distance[to] = distance[from] + 1;
           nearest[to] = nearest[from];
         }
@@ -176,50 +169,48 @@ export class RayImage {
         if (i < count - width) propagate(i, i + width);
       }
       for (let i = 0; i < count; i++)
-        if (nearest[i] >= 0 && nearest[i] !== i)
-          data.set(data.subarray(nearest[i] * 4, nearest[i] * 4 + 4), i * 4);
+        if (nearest[i] >= 0 && nearest[i] !== i) {
+          if (this.moving && distance[i] <= 2) this.fillGap(data, nearest, i);
+          else data.set(this.colours.subarray(nearest[i] * 4, nearest[i] * 4 + 4), i * 4);
+        }
     }
-    if (scale > 1) return this.expand(data, width, height, scale);
     return { width, height, data, mode: 'spatial' };
   }
-  private expand(
-    coarse: Uint8ClampedArray,
-    width: number,
-    height: number,
-    scale: number,
-  ): { width: number; height: number; data: Uint8ClampedArray; mode: 'spatial' } {
-    // Keep PNG dimensions fixed to avoid browser re-layout/scale jumps. Bilinear
-    // spatial reconstruction softens sparse coverage without warping ray coordinates
-    // or blending a previous viewpoint into the current one.
-    const data = new Uint8ClampedArray(this.width * this.height * 4);
-    for (let y = 0; y < this.height; y++)
-      for (let x = 0; x < this.width; x++) {
-        const gx = Math.max(0, Math.min(width - 1, (x + 0.5) / scale - 0.5)),
-          gy = Math.max(0, Math.min(height - 1, (y + 0.5) / scale - 0.5));
-        const x0 = Math.floor(gx),
-          y0 = Math.floor(gy),
-          fx = gx - x0,
-          fy = gy - y0;
-        const offsets = [
-          y0 * width + x0,
-          y0 * width + Math.min(width - 1, x0 + 1),
-          Math.min(height - 1, y0 + 1) * width + x0,
-          Math.min(height - 1, y0 + 1) * width + Math.min(width - 1, x0 + 1),
-        ];
-        const weights = [(1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy];
-        let total = 0;
-        const rgb = [0, 0, 0];
-        for (let i = 0; i < 4; i++) {
-          const source = offsets[i] * 4;
-          if (!coarse[source + 3]) continue; // Missing samples are not black surfaces.
-          total += weights[i];
-          for (let c = 0; c < 3; c++) rgb[c] += coarse[source + c] * weights[i];
-        }
-        if (!total) continue;
-        const target = (y * this.width + x) * 4;
-        for (let c = 0; c < 3; c++) data[target + c] = Math.round(rgb[c] / total);
-        data[target + 3] = 255;
+  private fillGap(data: Uint8ClampedArray, nearest: Int32Array, index: number): void {
+    // Local interpolation uses only real rays on the nearest observed surface.
+    // Material and relative encoded depth gate blending across walls/foreground.
+    // This is screen-space gap filling, not world-space camera reprojection.
+    const guide = nearest[index],
+      x = index % this.width,
+      y = Math.floor(index / this.width);
+    const tolerance = Math.max(8, this.depths[guide] * 0.05);
+    let total = 0,
+      r = 0,
+      g = 0,
+      b = 0;
+    for (let dy = -2; dy <= 2; dy++)
+      for (let dx = -2; dx <= 2; dx++) {
+        const sx = x + dx,
+          sy = y + dy;
+        if (sx < 0 || sy < 0 || sx >= this.width || sy >= this.height) continue;
+        const source = sy * this.width + sx;
+        // Filled pixels never become new interpolation sources.
+        if (
+          nearest[source] !== source ||
+          this.materials[source] !== this.materials[guide] ||
+          Math.abs(this.depths[source] - this.depths[guide]) > tolerance
+        )
+          continue;
+        const weight = 1 / (dx * dx + dy * dy),
+          pixel = source * 4;
+        total += weight;
+        r += this.colours[pixel] * weight;
+        g += this.colours[pixel + 1] * weight;
+        b += this.colours[pixel + 2] * weight;
       }
-    return { width: this.width, height: this.height, data, mode: 'spatial' };
+    const target = index * 4;
+    if (!total) data.set(this.colours.subarray(guide * 4, guide * 4 + 4), target);
+    else
+      data.set([Math.round(r / total), Math.round(g / total), Math.round(b / total), 255], target);
   }
 }

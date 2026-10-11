@@ -23,6 +23,7 @@ it('matches public captured Rust rays against the reference golden image', async
     Frames: { SampleOffset: number; RayDataBase64: string }[];
   };
   const image = new RayImage(fixture.Width, fixture.Height);
+  image.motion(true, 999); // Replay the capture with motion reconstruction enabled.
   for (const frame of fixture.Frames)
     image.add(
       { sampleOffset: frame.SampleOffset, rayData: Buffer.from(frame.RayDataBase64, 'base64') },
@@ -35,6 +36,10 @@ it('matches public captured Rust rays against the reference golden image', async
   for (let i = 0; i < actual.data.length; i++)
     if (Math.abs(actual.data[i] - expected.bitmap.data[i]) > (i % 4 === 3 ? 0 : 1)) mismatched++;
   expect(mismatched).toBe(0);
+  const reconstructed = image.render(1000).data;
+  for (let pixel = 0; pixel < actual.data.length; pixel += 4)
+    if (actual.data[pixel + 3])
+      expect(reconstructed.slice(pixel, pixel + 4)).toEqual(actual.data.slice(pixel, pixel + 4));
 });
 it('retains a complete stationary sweep across more than ten packets instead of making holes', () => {
   const image = new RayImage(8, 8);
@@ -140,15 +145,65 @@ it('retains a short recent packet window during movement instead of only one pac
   image.add(literal(2), 1200);
   expect(visible(image.render(1200, false).data)).toBe(2);
 });
-it('interpolates moving-image colours without painting unsampled areas black or erasing actual black regions', () => {
+it('preserves fully sampled moving-image detail exactly instead of reducing and blurring it', () => {
   const image = new RayImage(16, 16);
   image.motion(true, 1000);
   for (let i = 0; i < 256; i++) image.add(literal(i, i % 2 ? 63 : 0), 1001);
   const data = image.render(1001).data;
   expect(visible(data)).toBe(256);
-  expect(Array.from(data).some((v, i) => i % 4 === 0 && v > 0 && v < 153)).toBe(true);
+  expect(data).toEqual(image.render(1001, false).data);
   const black = new RayImage(16, 16);
   black.motion(true, 1000);
   for (let i = 0; i < 256; i++) black.add(literal(i, 0), 1001);
   expect(black.render(1001).data.every((v, i) => (i % 4 === 3 ? v === 255 : v === 0))).toBe(true);
+});
+
+function at(x: number, y: number, alignment: number, material = 3, depth = 100) {
+  const probe = new RayImage(9, 9);
+  for (let offset = 0; offset < 81; offset++) {
+    probe.add(literal(offset), 1000);
+    if (probe.render(1000, false).data[(y * 9 + x) * 4 + 3] === 255)
+      return {
+        sampleOffset: offset,
+        rayData: Buffer.from([255, depth >> 2, ((depth & 3) << 6) | alignment, material]),
+      };
+  }
+  throw new Error('Missing shuffled position.');
+}
+it('interpolates only missing pixels between nearby rays on the same surface', () => {
+  const image = new RayImage(9, 9);
+  image.motion(true, 1000);
+  image.add(at(2, 4, 0), 1001);
+  image.add(at(6, 4, 63), 1001);
+  const data = image.render(1001).data;
+  const pixel = (x: number) => Array.from(data.slice((4 * 9 + x) * 4, (4 * 9 + x) * 4 + 4));
+  expect(pixel(2)).toEqual([0, 0, 0, 255]);
+  expect(pixel(6)).toEqual([153, 153, 153, 255]);
+  expect(pixel(4)).toEqual([77, 77, 77, 255]);
+});
+it.each([
+  { material: 5, depth: 100 },
+  { material: 3, depth: 800 },
+])(
+  'does not interpolate gaps across distinct material/depth surfaces (%o)',
+  ({ material, depth }) => {
+    const image = new RayImage(9, 9);
+    image.motion(true, 1000);
+    image.add(at(2, 4, 0), 1001);
+    image.add(at(6, 4, 63, material, depth), 1001);
+    expect(Array.from(image.render(1001).data.slice((4 * 9 + 4) * 4, (4 * 9 + 4) * 4 + 4))).toEqual(
+      [0, 0, 0, 255],
+    );
+  },
+);
+it('preserves every observed pixel while reconstructing a sparse moving view', () => {
+  const image = new RayImage(160, 90);
+  image.motion(true, 1000);
+  for (let i = 0; i < 1000; i++) image.add(literal(i, i % 2 ? 63 : 0, i % 8), 1001);
+  const raw = image.render(1001, false).data,
+    rendered = image.render(1001).data;
+  for (let pixel = 0; pixel < raw.length; pixel += 4)
+    if (raw[pixel + 3])
+      expect(rendered.slice(pixel, pixel + 4)).toEqual(raw.slice(pixel, pixel + 4));
+  expect(visible(rendered)).toBeGreaterThan(160 * 90 * 0.99);
 });
