@@ -149,6 +149,53 @@ function component(
   });
   return interaction;
 }
+describe('camera Discord access', () => {
+  it('requires administrator registration and preserves options through the server picker', async () => {
+    const denied = command('camera', 'add', { server: second, id: 'ROOF', name: 'Roof' }, 'friend');
+    emit(denied);
+    await vi.waitFor(() => expect(output(denied)).toContain('Administrator'));
+    expect(host.cameras.registry(second).list()).toEqual([]);
+    const request = command('camera', 'add', { id: 'ROOF', name: 'Roof' });
+    emit(request);
+    await vi.waitFor(() => expect(output(request)).toContain('command-server:'));
+    const selection = component(
+      output(request).match(/command-server:[a-f0-9]+/)![0],
+      'owner',
+      'select',
+      { selected: second },
+    );
+    emit(selection);
+    await vi.waitFor(() => expect(output(selection)).toContain('Camera registered'));
+    expect(host.cameras.registry(second).list()).toEqual([{ id: 'ROOF', name: 'Roof' }]);
+    expect(host.cameras.registry('default').list()).toEqual([]);
+  });
+  it('binds watch menus to their owner and rechecks current operator roles', async () => {
+    config.PAIRING_WEB_URL = 'https://pair.example.org';
+    host.cameras.registry(second).add({ id: 'ROOF', name: 'Roof' });
+    const issue = vi.spyOn(host.cameras, 'issue').mockReturnValue('a'.repeat(64));
+    const stolen = component(`camera-watch:${second}:owner`, 'friend', 'select', {
+      selected: 'ROOF',
+    });
+    emit(stolen);
+    await vi.waitFor(() => expect(output(stolen)).toContain('your own'));
+    expect(issue).not.toHaveBeenCalled();
+    role = [];
+    const revoked = component(`camera-watch:${second}:friend`, 'friend', 'select', {
+      selected: 'ROOF',
+    });
+    emit(revoked);
+    await vi.waitFor(() => expect(output(revoked)).toContain('operator role'));
+    expect(issue).not.toHaveBeenCalled();
+    role = ['operator'];
+    const allowed = component(`camera-watch:${second}:friend`, 'friend', 'select', {
+      selected: 'ROOF',
+    });
+    emit(allowed);
+    await vi.waitFor(() => expect(output(allowed)).toContain('/camera#ticket='));
+    expect(issue).toHaveBeenCalledWith(second, 'friend', 'ROOF');
+    expect(output(allowed)).not.toContain(config.RUST_PLAYER_TOKEN);
+  });
+});
 describe('interactive pairing and management panels', () => {
   it('does not alter a registration while a switch operation is running', async () => {
     const sessions = (

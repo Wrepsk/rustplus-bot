@@ -29,6 +29,9 @@ export function createRustClient(config: Config): RustClient {
         ['rustplus.AppTeamInfo.Member', ['steamId', 'name']],
         ['rustplus.AppTeamInfo.Note', []],
         ['rustplus.AppTeamMessage', ['steamId', 'name', 'message']],
+        ['rustplus.AppCameraInfo', ['width', 'height']],
+        ['rustplus.AppCameraRays', ['rayData']],
+        ['rustplus.AppCameraRays.Entity', []],
       ];
       for (const [typeName, required] of metadataTypes) {
         const type = root.lookupType(typeName);

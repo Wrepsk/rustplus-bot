@@ -1,5 +1,16 @@
 # Live deployment checklist
 
+## Camera viewer — requires a real Rust server
+
+- [ ] Rebuild with the existing Compose web override. Confirm `/camera`, its assets and `/camera/api/` pass through the current HTTPS reverse proxy. No new DNS or public port is needed.
+- [ ] Register a powered camera identifier (not an entity ID), choose the correct server and view the feed while your paired player is offline and alive. Verify actual orientation and the ray-only rendering limitation (no separate entity/player-name overlays).
+- [ ] Test PTZ look controls, then drone movement in an empty, safe area. Verify every pulse releases, directions are correct and latency is usable. Test turret aim only; firing/reload must be absent. Unsupported movement must be rejected server-side.
+- [ ] While online, confirm another account cannot be borrowed until its owner enables sharing on that server. Revoke sharing and verify closure; repeat with unlinking, role revocation, owner login/death, server pause/restart and network loss. No automatic account switch after failure.
+- [ ] Open simultaneous viewer links for one server; only one should succeed. Exercise different servers in visible browser windows, expired/reused links, hidden tabs, abandoned viewers, stale frames and bot restart. Confirm chat and alarms keep working.
+- [ ] Verify unauthorized users cannot register cameras, use another member's menu or send controls. Confirm Rust tokens and session cookies never appear in Discord, pages or proxy/application logs.
+
+Camera automation tests use mocks, a local synthetic Rust+ WebSocket and generated rays. They do **not** verify a live camera or physical drone response.
+
 Automated mocks and the local protocol test cover application behavior. Every unchecked item below requires your Discord guild, Rust server, VPS or Docker Engine; none was verified with real credentials during this review. Use harmless test circuits first.
 
 - [ ] Back up the entire stopped data volume before updating, including `credentials.key`, every `servers/` database and WAL/SHM files. Keep `.env` and desktop pairing files private; run one bot instance per data volume.

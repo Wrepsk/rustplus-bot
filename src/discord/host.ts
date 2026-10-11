@@ -4,6 +4,7 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  StringSelectMenuBuilder,
   MessageFlags,
   REST,
   Routes,
@@ -35,6 +36,9 @@ import {
   commandServerPicker,
 } from './ui';
 import type { DeathPush } from '../pairing/schema';
+import { Cameras } from '../cameras/service';
+import { CameraWeb } from '../cameras/web';
+import { CameraError } from '../cameras/registry';
 
 type HostComponent = ButtonInteraction | ModalSubmitInteraction | StringSelectMenuInteraction;
 
@@ -53,6 +57,7 @@ interface PendingCommand {
 export class DiscordHost {
   readonly client: Client = Bot.createClient();
   readonly pairing: PairingService;
+  readonly cameras: Cameras;
   private web?: PairingWeb;
   private sessions = new Map<string, ServerSession>();
   private tasks = new Set<Promise<unknown>>();
@@ -67,10 +72,29 @@ export class DiscordHost {
     this.pairing = new PairingService(servers.root, servers.vault, (owner, event) =>
       this.death(owner, event),
     );
-    if (config.PAIRING_WEB_URL)
-      this.web = new PairingWeb(config.PAIRING_WEB_URL, (code) =>
-        this.pairing.isChallengeActive(code),
+    this.cameras = new Cameras(
+      servers,
+      (id) => this.sessions.get(id)?.rust,
+      async (id, user) => {
+        const guild = await this.client.guilds.fetch(this.config.DISCORD_GUILD_ID);
+        const member = await guild.members.fetch({ user, force: true });
+        this.permissions(id, {
+          id: member.id,
+          guildId: guild.id,
+          administrator: member.permissions.has('Administrator'),
+          roles: [...member.roles.cache.keys()],
+        });
+      },
+    );
+    if (config.PAIRING_WEB_URL) {
+      const cameraWeb = new CameraWeb(config.PAIRING_WEB_URL, this.cameras);
+      this.web = new PairingWeb(
+        config.PAIRING_WEB_URL,
+        (code) => this.pairing.isChallengeActive(code),
+        undefined,
+        (request, response) => cameraWeb.handle(request, response),
       );
+    }
     for (const profile of servers.list()) if (profile.enabled) this.create(profile.id);
     this.client.on(Events.InteractionCreate, (interaction) => {
       if (!this.stopping) this.track(this.interaction(interaction));
@@ -145,6 +169,7 @@ export class DiscordHost {
     this.sessions.get(profile.id)?.bot.activity.death(owner, identity.playerId, event);
   }
   private async restart(id: string): Promise<void> {
+    this.cameras.pause(id);
     const previous = this.sessions.get(id);
     this.sessions.delete(id);
     if (previous) {
@@ -182,6 +207,7 @@ export class DiscordHost {
     this.client.once(Events.ClientReady, () => {
       log.info('Discord ready');
       this.pairing.start();
+      this.cameras.start();
       for (const { bot } of this.sessions.values()) bot.startServices();
     });
     await this.client.login(this.config.DISCORD_TOKEN);
@@ -234,6 +260,11 @@ export class DiscordHost {
   private commandAccess(input: CommandInput): 'admin' | 'operator' | 'member' {
     const name = input.commandName;
     if (['panel', 'device', 'alarm', 'settings'].includes(name)) return 'admin';
+    if (name === 'camera') {
+      const sub = input.options.getSubcommand();
+      if (sub === 'share' && input.options.getBoolean('enabled') === false) return 'member';
+      return ['add', 'remove'].includes(sub) ? 'admin' : 'operator';
+    }
     if (name === 'chat' && input.options.getSubcommand() !== 'status') return 'admin';
     if (name === 'server') return input.options.getSubcommand() === 'use' ? 'operator' : 'admin';
     return name === 'pair' ? 'operator' : 'member';
@@ -251,7 +282,9 @@ export class DiscordHost {
         !interaction.options.getString('id')
       );
     if (name === 'pair') return interaction.options.getSubcommand() === 'status';
-    return ['panel', 'device', 'alarm', 'chat', 'settings', 'status', 'ping'].includes(name);
+    return ['panel', 'device', 'alarm', 'chat', 'settings', 'status', 'ping', 'camera'].includes(
+      name,
+    );
   }
   private async showServerPicker(interaction: ChatInputCommandInteraction): Promise<void> {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -349,12 +382,14 @@ export class DiscordHost {
         await this.serverAction(pending.input, interaction, id, principal);
       else if (pending.input.commandName === 'pair')
         await interaction.editReply(pairingStatus(this.pairing, this.servers, id, principal.id));
+      else if (pending.input.commandName === 'camera')
+        await this.cameraAction(pending.input, interaction, id, principal);
       else if (interaction.isStringSelectMenu())
         await this.sessionForCommand(id).bot.executeSelectedCommand(pending.input, interaction);
     } catch (error) {
       log.warn({ code: errorCode(error) }, 'Server selection failed');
       const content =
-        error instanceof UserError || error instanceof RustFailure
+        error instanceof UserError || error instanceof RustFailure || error instanceof CameraError
           ? error.message
           : 'The command failed. Run it again and check permissions and logs.';
       if (interaction.deferred || interaction.replied)
@@ -452,6 +487,26 @@ export class DiscordHost {
     });
   }
   private async interaction(interaction: Interaction): Promise<void> {
+    if (interaction.isStringSelectMenu?.() && interaction.customId.startsWith('camera-watch:')) {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      try {
+        const [, server, owner] = interaction.customId.split(':');
+        if (owner !== interaction.user.id || interaction.values.length !== 1)
+          throw new CameraError('Open your own /camera list menu.');
+        const principal = await this.principal(interaction);
+        this.permissions(server, principal);
+        await this.cameraLink(interaction, server, principal.id, interaction.values[0]);
+      } catch (error) {
+        await interaction.editReply({
+          content:
+            error instanceof CameraError || error instanceof UserError
+              ? error.message
+              : 'Camera request failed. Check permissions and try again.',
+          allowedMentions: { parse: [] },
+        });
+      }
+      return;
+    }
     if (
       (interaction.isStringSelectMenu?.() || interaction.isButton()) &&
       (interaction.customId.startsWith('command-server:') ||
@@ -505,6 +560,11 @@ export class DiscordHost {
         return;
       }
       const id = this.selected(interaction);
+      if (interaction.commandName === 'camera') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        await this.cameraAction(interaction, interaction, id, await this.principal(interaction));
+        return;
+      }
       if (!['server', 'pair'].includes(interaction.commandName)) {
         this.sessionForCommand(id).bot.dispatch(interaction);
         return;
@@ -614,7 +674,7 @@ export class DiscordHost {
     } catch (error) {
       log.warn({ code: errorCode(error) }, 'Server/pairing command failed');
       const safe =
-        error instanceof HostError || error instanceof RustFailure
+        error instanceof HostError || error instanceof RustFailure || error instanceof CameraError
           ? error.message
           : 'The operation failed. Check configuration, permissions and logs.';
       if (interaction.deferred || interaction.replied)
@@ -630,6 +690,111 @@ export class DiscordHost {
   private serverView(user: string) {
     return serversView(this.servers, user, (id) => this.sessions.get(id)?.rust.state || 'paused');
   }
+  private async cameraLink(
+    response: Pick<ChatInputCommandInteraction, 'editReply'>,
+    server: string,
+    viewer: string,
+    camera: string,
+  ): Promise<void> {
+    if (!this.config.PAIRING_WEB_URL)
+      throw new CameraError(
+        'The bot owner must configure the existing HTTPS pairing website (PAIRING_WEB_URL) to use cameras.',
+      );
+    const token = this.cameras.issue(server, viewer, camera);
+    await response.editReply({
+      embeds: [
+        card(
+          '📷 Camera viewer',
+          'Open this private link within **2 minutes**. Viewing lasts up to **10 minutes**. Your own offline account is preferred; another teammate’s account is used only with their explicit sharing consent.\n\nManual movement only. No firing, autopilot or player tracking. Rust enforces camera access and range restrictions. Keep this link private.',
+          this.servers.get(server).name,
+        ),
+      ],
+      components: [
+        new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder()
+            .setLabel('Open camera viewer')
+            .setStyle(ButtonStyle.Link)
+            .setURL(`${new URL(this.config.PAIRING_WEB_URL).origin}/camera#ticket=${token}`),
+        ),
+      ],
+      allowedMentions: { parse: [] },
+    });
+  }
+  private async cameraAction(
+    input: CommandInput,
+    response: Pick<ChatInputCommandInteraction, 'editReply'>,
+    server: string,
+    principal: Principal,
+  ): Promise<void> {
+    this.checkCommandAccess(input, server, principal);
+    const sub = input.options.getSubcommand(),
+      registry = this.cameras.registry(server);
+    if (sub === 'watch' && input.options.getString('id')) {
+      await this.cameraLink(response, server, principal.id, input.options.getString('id', true));
+      return;
+    }
+    let description: string;
+    if (sub === 'add') {
+      registry.add({
+        id: input.options.getString('id', true),
+        name: input.options.getString('name', true),
+      });
+      description =
+        'Camera registered. Use /camera watch to view it. Camera identifiers are configured in-game; Smart Device pairing/entity IDs are separate.';
+    } else if (sub === 'remove') {
+      registry.remove(input.options.getString('id', true));
+      this.cameras.pause(server);
+      description = 'Camera removed. Any viewer on this server was closed.';
+    } else if (sub === 'share') {
+      const enabled = input.options.getBoolean('enabled', true);
+      this.cameras.share(server, principal.id, enabled);
+      description = enabled
+        ? 'You consented to operators on this Discord server viewing and manually moving registered cameras through **your** paired Rust account, only while it is offline and alive. This is limited to this Rust server. Revoke with /camera share enabled:false or /pair unlink.'
+        : 'Your camera sharing consent was revoked. Related viewers were closed immediately.';
+    } else if (sub === 'stop') {
+      const admin = new Permissions(
+        this.config.DISCORD_GUILD_ID,
+        this.config.ADMIN_USER_ID,
+        () => [],
+      ).admin(principal);
+      this.cameras.stopFor(server, principal.id, admin);
+      description = admin
+        ? 'Camera viewing stopped for this server.'
+        : 'Your camera viewing and sessions borrowing your account were stopped.';
+    } else {
+      const cameras = registry.list();
+      await response.editReply({
+        embeds: [
+          card(
+            '📷 Rust+ Cameras',
+            cameras.length
+              ? cameras
+                  .map((c) => `**${escapeMarkdown(c.name)}** · ${escapeMarkdown(c.id)}`)
+                  .join('\n')
+              : 'No cameras registered. An administrator can use /camera add with the identifier configured in-game.',
+            this.servers.get(server).name,
+          ),
+        ],
+        components: cameras.length
+          ? [
+              new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+                new StringSelectMenuBuilder()
+                  .setCustomId(`camera-watch:${server}:${principal.id}`)
+                  .setPlaceholder('Choose a camera to watch')
+                  .addOptions(cameras.map((c) => ({ label: c.name, value: c.id }))),
+              ),
+            ]
+          : [],
+        allowedMentions: { parse: [] },
+      });
+      return;
+    }
+    await response.editReply({
+      embeds: [card('📷 Cameras', description, this.servers.get(server).name)],
+      components: [],
+      allowedMentions: { parse: [] },
+    });
+  }
   private operatorSomewhere(principal: Principal): void {
     for (const profile of this.servers.list()) {
       try {
@@ -643,6 +808,9 @@ export class DiscordHost {
   }
   private async unlink(principal: Principal): Promise<void> {
     await this.serialize(async () => {
+      this.cameras.revoke(principal.id);
+      for (const profile of this.servers.list())
+        this.servers.store(profile.id).set(`cameraShare:${principal.id}`, false);
       for (const session of this.sessions.values()) session.identities.drop(principal.id);
       this.pairing.unlink(principal.id);
       this.servers.unlink(principal.id);
@@ -873,6 +1041,7 @@ export class DiscordHost {
   async stop(): Promise<void> {
     this.stopping = true;
     this.pendingCommands.clear();
+    this.cameras.stop();
     await this.web?.stop();
     this.pairing.stop();
     for (const { identities } of this.sessions.values()) identities.stop();

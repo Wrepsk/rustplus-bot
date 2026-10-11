@@ -15,10 +15,16 @@ export interface RustResponse {
   info?: { name: string; players: number; maxPlayers: number };
   entityInfo?: { type: number; payload: { value?: boolean } };
   teamChat?: { messages: TeamMessage[] };
+  cameraSubscribeInfo?: CameraInfo;
   teamInfo?: {
     leaderSteamId: { toString(): string };
     // AppTeamInfo.Member fields verified in the installed rustplus.proto.
-    members: { steamId: { toString(): string }; name: string; isOnline?: boolean }[];
+    members: {
+      steamId: { toString(): string };
+      name: string;
+      isOnline?: boolean;
+      isAlive?: boolean;
+    }[];
   };
 }
 export interface RustMessage {
@@ -27,6 +33,7 @@ export interface RustMessage {
     entityChanged?: { entityId: number; payload: { value?: boolean } };
     teamMessage?: { message: TeamMessage };
     teamChanged?: { teamInfo: NonNullable<RustResponse['teamInfo']> };
+    cameraRays?: CameraRays;
   };
 }
 export interface RustRequest {
@@ -37,6 +44,20 @@ export interface RustRequest {
   getEntityInfo?: object;
   setEntityValue?: { value: boolean };
   sendTeamMessage?: { message: string };
+  cameraSubscribe?: { cameraId: string };
+  cameraUnsubscribe?: object;
+  cameraInput?: { buttons: number; mouseDelta: { x: number; y: number } };
+}
+export interface CameraInfo {
+  width: number;
+  height: number;
+  nearPlane: number;
+  farPlane: number;
+  controlFlags: number;
+}
+export interface CameraRays {
+  sampleOffset: number;
+  rayData: Uint8Array;
 }
 export interface RustClient extends EventEmitter {
   connect(): void;

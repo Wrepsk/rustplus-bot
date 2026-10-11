@@ -143,6 +143,8 @@ export class Connection extends EventEmitter {
         this.emit('chat', message.broadcast.teamMessage.message);
       if (this.online && message.broadcast?.teamChanged)
         this.emit('teamChanged', message.broadcast.teamChanged.teamInfo);
+      if (this.online && message.broadcast?.cameraRays)
+        this.emit('cameraRays', message.broadcast.cameraRays);
     });
     this.watchdog = setTimeout(() => {
       if (current()) this.recover();

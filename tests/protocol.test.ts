@@ -20,6 +20,99 @@ const upstreamRequire = createRequire(libraryPath);
 const protobuf = upstreamRequire('protobufjs') as typeof import('protobufjs');
 
 describe('installed rustplus.js protocol compatibility', () => {
+  it('subscribes to cameras, decodes default-valued rays and sends movement using the installed schema', async () => {
+    const root = await protobuf.load(join(dirname(libraryPath), 'rustplus.proto'));
+    for (const name of [
+      'rustplus.AppInfo',
+      'rustplus.AppCameraInfo',
+      'rustplus.AppCameraRays',
+      'rustplus.AppCameraRays.Entity',
+    ]) {
+      const type = root.lookupType(name);
+      for (const field of [...type.fieldsArray])
+        if (field.required)
+          type
+            .remove(field)
+            .add(protobuf.Field.fromJSON(field.name, { ...field.toJSON(), rule: 'optional' }));
+    }
+    const requestType = root.lookupType('rustplus.AppRequest'),
+      messageType = root.lookupType('rustplus.AppMessage');
+    const server = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+    await once(server, 'listening');
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('No test address.');
+    const requests: Record<string, unknown>[] = [];
+    let peer: WebSocket | undefined;
+    server.on('connection', (socket) => {
+      peer = socket;
+      socket.on('message', (bytes) => {
+        const request = requestType.toObject(
+          requestType.decode(Buffer.from(bytes as Buffer)),
+        ) as Record<string, unknown>;
+        requests.push(request);
+        const response = {
+          seq: request.seq,
+          ...(request.getInfo
+            ? { info: { name: 'Mock' } }
+            : request.cameraSubscribe
+              ? { cameraSubscribeInfo: { width: 4, height: 4 } }
+              : { success: {} }),
+        };
+        socket.send(messageType.encode(messageType.fromObject({ response })).finish());
+      });
+    });
+    const connection = new Connection(
+      {
+        RUST_SERVER_IP: '127.0.0.1',
+        RUST_APP_PORT: address.port,
+        RUST_STEAM_ID: '76561198000000000',
+        RUST_PLAYER_TOKEN: '1',
+        RUST_USE_PROXY: false,
+      } as Config,
+      () => [],
+      undefined,
+      0,
+    );
+    try {
+      const ready = once(connection, 'ready');
+      connection.start();
+      await ready;
+      const info = (await connection.request({ cameraSubscribe: { cameraId: 'ROOF' } }))
+        .cameraSubscribeInfo;
+      expect(info?.controlFlags).toBe(0);
+      const rays = once(connection, 'cameraRays');
+      peer!.send(
+        messageType
+          .encode(
+            messageType.fromObject({
+              broadcast: {
+                cameraRays: {
+                  rayData: Buffer.from([0, 0]),
+                  entities: [{ entityId: 1, type: 2, position: {}, rotation: {}, size: {} }],
+                },
+              },
+            }),
+          )
+          .finish(),
+      );
+      expect((await rays)[0].sampleOffset).toBe(0);
+      expect(
+        (await connection.request({ cameraInput: { buttons: 2, mouseDelta: { x: 0, y: 0 } } }))
+          .success,
+      ).toBeDefined();
+      await connection.request({ cameraUnsubscribe: {} });
+      expect(
+        requests.some((r) => (r.cameraSubscribe as { cameraId?: string })?.cameraId === 'ROOF'),
+      ).toBe(true);
+      expect(requests.some((r) => (r.cameraInput as { buttons?: number })?.buttons === 2)).toBe(
+        true,
+      );
+    } finally {
+      connection.stop();
+      for (const socket of server.clients) socket.terminate();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 10000);
   it.each([false, true])(
     'authenticates, controls switches and restores subscriptions (omitted defaults: %s)',
     async (omitDefaults) => {

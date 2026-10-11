@@ -3,6 +3,70 @@ import { ApplicationCommandOptionType, ChannelType, SlashCommandBuilder } from '
 const idOption = { name: 'id', description: 'Registered Rust+ entity ID', required: true };
 export const commands = [
   new SlashCommandBuilder()
+    .setName('camera')
+    .setDescription('View registered Rust+ cameras and control movement')
+    .addSubcommand((s) =>
+      s
+        .setName('add')
+        .setDescription('Register a CCTV, PTZ, drone or turret camera (administrator)')
+        .addStringOption((o) =>
+          o
+            .setName('id')
+            .setDescription('In-game camera identifier (not an entity ID)')
+            .setRequired(true)
+            .setMinLength(1)
+            .setMaxLength(32),
+        )
+        .addStringOption((o) =>
+          o
+            .setName('name')
+            .setDescription('Friendly camera name')
+            .setRequired(true)
+            .setMinLength(1)
+            .setMaxLength(60),
+        ),
+    )
+    .addSubcommand((s) =>
+      s
+        .setName('remove')
+        .setDescription('Remove a registered camera (administrator)')
+        .addStringOption((o) =>
+          o
+            .setName('id')
+            .setDescription('Registered camera identifier')
+            .setRequired(true)
+            .setMaxLength(32),
+        ),
+    )
+    .addSubcommand((s) => s.setName('list').setDescription('Show cameras and choose one to view'))
+    .addSubcommand((s) =>
+      s
+        .setName('watch')
+        .setDescription('Open a private web viewer with manual movement controls')
+        .addStringOption((o) =>
+          o
+            .setName('id')
+            .setDescription('Optional registered identifier; omit to choose a camera')
+            .setMaxLength(32),
+        ),
+    )
+    .addSubcommand((s) =>
+      s
+        .setName('share')
+        .setDescription('Allow operators to borrow YOUR offline account for cameras on this server')
+        .addBooleanOption((o) =>
+          o
+            .setName('enabled')
+            .setDescription('Explicitly enable sharing, or revoke it immediately')
+            .setRequired(true),
+        ),
+    )
+    .addSubcommand((s) =>
+      s
+        .setName('stop')
+        .setDescription('Close your camera session; administrators may stop any viewer'),
+    ),
+  new SlashCommandBuilder()
     .setName('server')
     .setDescription('Manage saved Rust servers')
     .addSubcommand((s) =>

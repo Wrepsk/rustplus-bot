@@ -80,6 +80,7 @@ export class PairingWeb {
     private origin: string,
     private active: (code: string) => boolean,
     private register: Registration = registerCompanion,
+    private extraRoute?: (request: IncomingMessage, response: ServerResponse) => Promise<boolean>,
   ) {
     this.origin = new URL(origin).origin;
     this.server.requestTimeout = 15000;
@@ -151,6 +152,7 @@ export class PairingWeb {
     response.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
     try {
       if (this.stopped) throw new WebError(503, 'Pairing is restarting. Try again shortly.');
+      if (await this.extraRoute?.(request, response)) return;
       if (request.method === 'GET' && request.url === '/pairing-extension.zip') {
         this.archive ??= extensionZip(this.origin);
         response.writeHead(200, {
