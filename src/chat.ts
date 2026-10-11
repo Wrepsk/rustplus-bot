@@ -94,7 +94,10 @@ export class ChatBridge {
         return;
       this.polling = true;
       try {
-        this.observeTeam((await this.rust.request({ getTeamInfo: {} })).teamInfo);
+        const team = (await this.rust.request({ getTeamInfo: {} })).teamInfo;
+        this.observeTeam(team);
+        if (!team?.members.length || !/^\d{17}$/.test(team.leaderSteamId.toString()))
+          throw new ChatIdentityError('Create or join a Rust team to enable team chat.');
         if (epoch !== this.epoch || this.stopped || !this.enabled) return;
         const response = await this.rust.request({ getTeamChat: {} });
         if (epoch !== this.epoch || this.stopped || !this.enabled) return;

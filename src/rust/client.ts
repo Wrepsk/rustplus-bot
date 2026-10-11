@@ -26,6 +26,8 @@ export function createRustClient(config: Config): RustClient {
       // response correlation, request requirements, entity types and payload presence.
       const metadataTypes: [string, string[]][] = [
         ['rustplus.AppInfo', ['name']],
+        // No-team responses omit the zero leader ID. This is normal data, not a transport failure.
+        ['rustplus.AppTeamInfo', []],
         ['rustplus.AppTeamInfo.Member', ['steamId', 'name']],
         ['rustplus.AppTeamInfo.Note', []],
         ['rustplus.AppTeamMessage', ['steamId', 'name', 'message']],

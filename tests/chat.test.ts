@@ -80,6 +80,25 @@ function fixture() {
   } as unknown as Message;
   return { store, rust, bridge, send, discord, reply, member };
 }
+it('waits for a real team without reconnecting, then resumes baseline sync after joining', async () => {
+  vi.useFakeTimers();
+  const { bridge, rust, discord, reply, send } = fixture();
+  const validTeam = rust.teamInfo;
+  rust.teamInfo = { leaderSteamId: '0', members: [] };
+  await bridge.reset();
+  expect(bridge.status()).toContain('check team membership');
+  expect(bridge.status()).not.toContain('Live');
+  expect(rust.online).toBe(true);
+  expect(rust.request.mock.calls.some(([r]) => r.getTeamChat)).toBe(false);
+  await bridge.fromDiscord(discord);
+  expect(reply).toHaveBeenCalledOnce();
+  expect(rust.request.mock.calls.some(([r]) => r.sendTeamMessage)).toBe(false);
+  rust.teamInfo = validTeam;
+  rust.history = [{ steamId: '76561198000000000', name: 'Owner', message: 'old', time: 100 }];
+  await vi.advanceTimersByTimeAsync(30000);
+  expect(bridge.status()).toContain('Live');
+  expect(send).not.toHaveBeenCalled();
+});
 async function settle(bridge: ChatBridge) {
   await bridge.drain();
 }

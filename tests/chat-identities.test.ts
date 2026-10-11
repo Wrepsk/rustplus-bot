@@ -86,6 +86,13 @@ afterEach(() => {
 });
 
 describe('personal Rust+ chat identities', () => {
+  it('rejects unknown zero leaders even if both snapshots contain matching members', async () => {
+    const { sender, primary, personal, link } = fixture();
+    link();
+    primary.leader = personal.leader = '0';
+    await expect(sender.send('alice', 'private text', vi.fn())).rejects.toThrow('mirrored');
+    expect(personal.request.mock.calls.some(([r]) => r.sendTeamMessage)).toBe(false);
+  });
   it('requires a pairing and never falls back to the monitoring account', async () => {
     const { sender, primary, factory } = fixture();
     await expect(sender.send('alice', 'hello', vi.fn())).rejects.toThrow('Link your personal');

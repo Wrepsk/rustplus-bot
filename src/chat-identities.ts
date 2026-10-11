@@ -152,6 +152,7 @@ export class ChatIdentities implements ChatSender {
         !identity ||
         !team ||
         !own ||
+        !/^\d{17}$/.test(team.leaderSteamId.toString()) ||
         !team.members.some((m) => m.steamId.toString() === identity.playerId) ||
         team.leaderSteamId.toString() !== own.leaderSteamId.toString()
       )

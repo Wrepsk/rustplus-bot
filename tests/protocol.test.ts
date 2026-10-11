@@ -122,6 +122,7 @@ describe('installed rustplus.js protocol compatibility', () => {
       if (omitDefaults) {
         for (const [name, fieldName] of [
           ['rustplus.AppInfo', 'queuedPlayers'],
+          ['rustplus.AppTeamInfo', 'leaderSteamId'],
           ['rustplus.AppTeamInfo.Member', 'isOnline'],
           ['rustplus.AppTeamInfo.Member', 'x'],
           ['rustplus.AppTeamInfo.Member', 'y'],
@@ -151,6 +152,7 @@ describe('installed rustplus.js protocol compatibility', () => {
       let primaryPeer: WebSocket | undefined;
       let switchValue = false;
       let initialFrame: Uint8Array | undefined;
+      let noTeam = false;
       const offlineMember = {
         steamId: '76561198000000002',
         name: 'Egemen',
@@ -201,7 +203,7 @@ describe('installed rustplus.js protocol compatibility', () => {
               maxPlayers: 100,
               ...(omitDefaults ? {} : { queuedPlayers: 0 }),
             };
-          else if (request.getTeamInfo) response.teamInfo = teamInfo;
+          else if (request.getTeamInfo) response.teamInfo = noTeam ? {} : teamInfo;
           else if (request.getEntityInfo)
             response.entityInfo = {
               type: request.entityId === 42 ? 1 : 2,
@@ -343,6 +345,25 @@ describe('installed rustplus.js protocol compatibility', () => {
         });
         expect(team.teamInfo?.members[0]).toMatchObject({ isOnline: true, x: 10, isAlive: true });
         if (omitDefaults) {
+          // A solo player's empty team response previously caused the reported reconnect loop.
+          const emptyFrame = messageType
+            .encode(messageType.fromObject({ response: { seq: 100, teamInfo: {} } }))
+            .finish();
+          expect(() => originalType.decode(emptyFrame)).toThrow("missing required 'leaderSteamId'");
+          noTeam = true;
+          const emptyTeam = await connection.request({ getTeamInfo: {} });
+          expect(emptyTeam.teamInfo?.leaderSteamId.toString()).toBe('0');
+          expect(emptyTeam.teamInfo?.members).toEqual([]);
+          const emptyBroadcast = once(connection, 'teamChanged');
+          send({ broadcast: { teamChanged: { teamInfo: {} } } });
+          expect((await emptyBroadcast)[0].leaderSteamId.toString()).toBe('0');
+          expect((await connection.request({ getInfo: {} })).info?.name).toBe(
+            'Local Protocol Test',
+          );
+          expect(connection.state).toBe('connected');
+          noTeam = false;
+        }
+        if (omitDefaults) {
           // Reproduce the exact VPS failure with earlier required fields present.
           const frame = messageType
             .encode(
@@ -451,7 +472,7 @@ describe('installed rustplus.js protocol compatibility', () => {
         ).toEqual([42, 43]);
         expect(
           requests.filter((r) => r.getInfo && r.playerId === config.RUST_STEAM_ID),
-        ).toHaveLength(2);
+        ).toHaveLength(omitDefaults ? 3 : 2); // Includes the no-team connection-health probe above.
         expect(connection.state).toBe('connected');
         await vi.waitFor(() => expect(bridge.status()).toContain('Live'));
         const duplicate = once(connection, 'chat');
