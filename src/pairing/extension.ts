@@ -3,7 +3,7 @@ export const nativeBridge = String.raw`
 (() => {
   if (window !== window.top || location.origin !== 'https://companion-rust.facepunch.com') return;
   const key = 'rust-base-login';
-  let pending = null, ready = false, sent = false;
+  let pending = null, ready = false, sent = false, inFlight = false;
   try {
     const nonce = new URLSearchParams(location.hash.slice(1)).get('rust-base-bridge');
     const callback = new URL(new URLSearchParams(location.search).get('returnUrl') || '');
@@ -16,21 +16,31 @@ export const nativeBridge = String.raw`
   // Leave real native bridges and the official consent UI untouched.
   if (window.ReactNativeWebView !== undefined) return;
   const flush = () => {
-    if (!pending || !ready) return;
+    if (!pending || !ready || inFlight) return;
+    inFlight = true;
     // Synchronous DOM events reach the isolated relay before Facepunch navigates away.
     window.dispatchEvent(new CustomEvent('rust-base-native', { detail: JSON.stringify(pending) }));
     pending = null;
   };
   window.addEventListener('rust-base-relay-ready', () => { ready = true; flush(); });
+  window.addEventListener('rust-base-delivery', (event) => {
+    inFlight = false;
+    sent = event.detail === 'ok';
+    if (sent) sessionStorage.removeItem(key);
+  });
   window.ReactNativeWebView = { postMessage: (message) => {
-    if (sent || typeof message !== 'string' || message.length > 12000) return;
+    if (sent || inFlight || typeof message !== 'string' || message.length > 12000) return;
     try {
       const data = JSON.parse(message);
-      if (!/^\d{17}$/.test(data.SteamId || '') || typeof data.Token !== 'string' || !/^[A-Za-z0-9._~-]{20,10000}$/.test(data.Token)) return;
-      sent = true; pending = { SteamId: data.SteamId, Token: data.Token };
-      sessionStorage.removeItem(key); flush();
-    } catch { /* Never print auth payloads. */ }
+      if (typeof data?.SteamId !== 'string' || !/^\d{17}$/.test(data.SteamId) || typeof data.Token !== 'string' || !/^[A-Za-z0-9._~-]{20,10000}$/.test(data.Token)) {
+        window.dispatchEvent(new Event('rust-base-invalid-auth')); return;
+      }
+      pending = { SteamId: data.SteamId, Token: data.Token }; flush();
+    } catch { window.dispatchEvent(new Event('rust-base-invalid-auth')); }
   } };
+  // Content scripts in MAIN and ISOLATED worlds may start in either order.
+  // If the relay's first ready event was missed, ask it to announce itself again.
+  window.dispatchEvent(new Event('rust-base-bridge-ready'));
   setTimeout(() => { pending = null; }, 900000);
 })();
 `;
@@ -38,14 +48,27 @@ export const nativeBridge = String.raw`
 export const nativeRelay = String.raw`
 (() => {
   if (window !== window.top) return;
+  const ready = () => window.dispatchEvent(new Event('rust-base-relay-ready'));
+  window.addEventListener('rust-base-bridge-ready', ready);
+  const fail = () => {
+    window.dispatchEvent(new CustomEvent('rust-base-delivery', { detail: 'failed' }));
+    console.warn('Rust Base pairing: login handoff failed. Check the original pairing website, then reload the extension and start a fresh login. No credentials were logged.');
+    void chrome.runtime.sendMessage({ type: 'failed' }).catch(() => {});
+  };
+  window.addEventListener('rust-base-invalid-auth', fail);
   window.addEventListener('rust-base-native', (event) => {
     if (typeof event.detail !== 'string' || event.detail.length > 12000) return;
     try {
       const data = JSON.parse(event.detail);
-      void chrome.runtime.sendMessage({ type: 'native', SteamId: data.SteamId, Token: data.Token }).catch(() => {});
-    } catch { /* Invalid payloads are ignored without logging them. */ }
+      void chrome.runtime.sendMessage({ type: 'native', SteamId: data.SteamId, Token: data.Token }).then((result) => {
+        if (!result?.ok) { fail(); return; }
+        window.dispatchEvent(new CustomEvent('rust-base-delivery', { detail: 'ok' }));
+        // Acknowledge delivery before asking the worker to close this tab.
+        void chrome.runtime.sendMessage({ type: 'finish' }).catch(() => {});
+      }).catch(fail);
+    } catch { fail(); }
   });
-  window.dispatchEvent(new Event('rust-base-relay-ready'));
+  ready();
 })();
 `;
 
@@ -55,13 +78,17 @@ export const websiteRelay = String.raw`
   window.addEventListener('message', (event) => {
     if (event.source !== window || event.origin !== location.origin) return;
     if (event.data?.type === 'RUST_BASE_PING')
-      window.postMessage({ type: 'RUST_BASE_READY', version: '1.0.0' }, location.origin);
+      window.postMessage({ type: 'RUST_BASE_READY', version: '1.0.1' }, location.origin);
     if (event.data?.type !== 'RUST_BASE_START' || typeof event.data.loginUrl !== 'string') return;
     void chrome.runtime.sendMessage({ type: 'start', loginUrl: event.data.loginUrl }).then((result) => {
       if (!result?.ok) window.postMessage({ type: 'RUST_BASE_ERROR', error: 'Could not open the extension login. Refresh this page and try again.' }, location.origin);
     }).catch(() => window.postMessage({ type: 'RUST_BASE_ERROR', error: 'Extension unavailable. Reload the extension and refresh this page.' }, location.origin));
   });
   chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+    if (message?.type === 'error') {
+      window.postMessage({ type: 'RUST_BASE_ERROR' }, location.origin);
+      respond({ ok: true }); return;
+    }
     if (message?.type !== 'result' || typeof message.address !== 'string') return;
     window.postMessage({ type: 'RUST_BASE_RESULT', address: message.address }, location.origin);
     respond({ ok: true });
@@ -87,6 +114,22 @@ function auth(data) {
   return data && typeof data.SteamId === 'string' && /^\d{17}$/.test(data.SteamId) &&
     typeof data.Token === 'string' && /^[A-Za-z0-9._~-]{20,10000}$/.test(data.Token);
 }
+async function finish(tabId) {
+  const key = prefix + tabId;
+  const stored = (await chrome.storage.session.get(key))[key];
+  if (!stored?.delivered) return { ok: false };
+  await chrome.storage.session.remove(key);
+  await chrome.tabs.remove(tabId).catch(() => {});
+  return { ok: true };
+}
+async function failed(tabId) {
+  const stored = (await chrome.storage.session.get(prefix + tabId))[prefix + tabId];
+  if (!stored || stored.delivered || stored.expires <= Date.now()) return { ok: false };
+  const target = await chrome.tabs.get(stored.siteTab);
+  if (!website(target.url)) return { ok: false };
+  await chrome.tabs.sendMessage(stored.siteTab, { type: 'error' }, { documentId: stored.documentId });
+  return { ok: false };
+}
 async function deliver(tabId, data, redirect) {
   if (!auth(data)) return { ok: false };
   const key = prefix + tabId;
@@ -94,6 +137,7 @@ async function deliver(tabId, data, redirect) {
   if (!stored || stored.expires <= Date.now()) {
     await chrome.storage.session.remove(key); return { ok: false };
   }
+  if (stored.delivered) return { ok: false };
   if (redirect && redirect !== stored.callback) return { ok: false };
   const target = await chrome.tabs.get(stored.siteTab);
   if (!website(target.url)) return { ok: false };
@@ -102,9 +146,10 @@ async function deliver(tabId, data, redirect) {
   address.searchParams.set('token', data.Token);
   const result = await chrome.tabs.sendMessage(stored.siteTab, { type: 'result', address: address.href }, { documentId: stored.documentId });
   if (!result?.ok) return { ok: false };
-  await chrome.storage.session.remove(key);
+  // Retain only metadata until the content script receives our acknowledgement.
+  // Closing its tab here would close the runtime message port before responding.
+  await chrome.storage.session.set({ [key]: { ...stored, delivered: true } });
   await chrome.tabs.update(stored.siteTab, { active: true }).catch(() => {});
-  await chrome.tabs.remove(tabId).catch(() => {});
   return { ok: true };
 }
 async function receive(message, sender) {
@@ -135,8 +180,11 @@ async function receive(message, sender) {
     catch { await chrome.storage.session.remove(key); await chrome.tabs.remove(tab.id).catch(() => {}); return { ok: false }; }
     return { ok: true };
   }
-  if (message?.type === 'native' && new URL(sender.url).origin === FP)
-    return deliver(sender.tab.id, message);
+  if (new URL(sender.url).origin === FP) {
+    if (message?.type === 'finish') return finish(sender.tab.id);
+    if (message?.type === 'failed') return failed(sender.tab.id);
+    if (message?.type === 'native') return deliver(sender.tab.id, message);
+  }
   return { ok: false };
 }
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
@@ -153,7 +201,10 @@ chrome.webRequest.onHeadersReceived.addListener((details) => {
     if (u.searchParams.getAll('steamId').length !== 1 || u.searchParams.getAll('token').length !== 1) return;
     const data = { SteamId: u.searchParams.get('steamId'), Token: u.searchParams.get('token') };
     const redirect = u.origin + u.pathname;
-    void serialize(() => deliver(details.tabId, data, redirect)).catch(() => {});
+    void serialize(async () => {
+      const result = await deliver(details.tabId, data, redirect);
+      if (result.ok) await finish(details.tabId);
+    }).catch(() => {});
   } catch { /* No auth data is logged. */ }
 }, { urls: [FP + '/*'], types: ['main_frame'] }, ['responseHeaders']);
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -177,7 +228,7 @@ export function extensionFiles(origin: string): Record<string, string> {
       {
         manifest_version: 3,
         name: 'Rust Base Website Pairing',
-        version: '1.0.0',
+        version: '1.0.1',
         minimum_chrome_version: '111',
         description:
           'Returns your requested Rust+ login to your own Discord bot’s pairing website.',

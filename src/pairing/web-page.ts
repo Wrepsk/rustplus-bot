@@ -55,9 +55,12 @@ const extensionStatus = () => {
 };
 window.addEventListener('message', (event) => {
   if (event.source !== window || event.origin !== location.origin) return;
-  if (event.data?.type === 'RUST_BASE_READY') { extensionReady = true; extensionStatus(); }
+  if (event.data?.type === 'RUST_BASE_READY') {
+    extensionReady = /^1\.0\.([1-9]\d*)$/.test(event.data.version || ''); extensionStatus();
+    if (!extensionReady) status('Update the pairing extension: download the new ZIP, replace its files, click Reload in chrome://extensions, and refresh this page.', true);
+  }
   if (event.data?.type === 'RUST_BASE_ERROR') {
-    clearTimeout(loginTimer); status('Extension login failed. Reload the extension, refresh this page, and try again.', true);
+    clearTimeout(loginTimer); status('The extension could not return this login. Update or reload the extension, refresh this page, and start a fresh sign-in. Keep the original website tab open throughout.', true);
   }
   if (event.data?.type !== 'RUST_BASE_RESULT' || typeof event.data.address !== 'string' || event.data.address.length > 12000 || !callback) return;
   try {

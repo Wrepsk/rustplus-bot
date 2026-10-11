@@ -93,7 +93,7 @@ describe('website extension pairing', () => {
       expect.objectContaining({ type: 'RUST_BASE_START' }),
       expect.anything(),
     );
-    ui.message({ type: 'RUST_BASE_READY' });
+    ui.message({ type: 'RUST_BASE_READY', version: '1.0.1' });
     await ui.click('steam');
     expect(ui.window.postMessage).toHaveBeenLastCalledWith(
       { type: 'RUST_BASE_START', loginUrl: ui.loginUrl },
@@ -101,6 +101,20 @@ describe('website extension pairing', () => {
     );
     expect(page).not.toContain('RustPlus Pairing.cmd');
     expect(ui.storage.get('rust-base-code')).toBe('synthetic-discord-code');
+  });
+  it('blocks the outdated extension and displays a useful handoff failure', async () => {
+    const ui = browser();
+    await ui.click('prepare');
+    ui.message({ type: 'RUST_BASE_READY', version: '1.0.0' });
+    expect(ui.get('status').textContent).toContain('Update the pairing extension');
+    await ui.click('steam');
+    expect(ui.window.postMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'RUST_BASE_START' }),
+      expect.anything(),
+    );
+    ui.message({ type: 'RUST_BASE_READY', version: '1.0.1' });
+    ui.message({ type: 'RUST_BASE_ERROR' });
+    expect(ui.get('status').textContent).toContain('could not return this login');
   });
   it('rejects unrelated and cross-origin results and sends a valid result only after confirmation', async () => {
     const ui = browser();

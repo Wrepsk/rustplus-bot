@@ -20,6 +20,8 @@ One-time browser setup: download the ZIP from the pairing page and extract it to
 
 **Still redirected to `https://rust.facepunch.com/companion`?** No pairing has completed. Verify this domain's extension is enabled, refresh the website, obtain a fresh `/pair start` link if expired, and launch Steam from the website button. Independently opened old login tabs are not associated with the current session. Complete the official Facepunch warning yourself. If blocked, report only the route/domain and visible error, never the token or page source. No DNS/Nginx changes or browser-security flags are needed for the handoff. The desktop helper below remains a legacy option when website mode is disabled; website mode does not advertise it.
 
+**Continue does nothing on Facepunch's `/app` page?** Update to extension **1.0.1** or later: download a fresh ZIP from the updated pairing website, replace the files in your existing extracted folder, and click **Reload** on its `chrome://extensions` card. Close old Facepunch login tabs, refresh the pairing website, and start a fresh sign-in from its button. Updating the VPS alone does not update an unpacked browser extension. This version fixes a missed readiness event when the two browser script worlds load in the opposite order, and acknowledges delivery before closing the login tab. Failed handoffs show a controlled error on the original website without exposing credentials. Keep that website tab open without refreshing during sign-in.
+
 Owner setup, once (existing domain + HTTPS required):
 
 1. Back up your data volume. Put the updated code on the VPS and keep your existing working Docker security/execution settings.

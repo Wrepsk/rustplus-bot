@@ -1,6 +1,6 @@
 import { runInNewContext, Script } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
-import { extensionFiles, extensionZip, nativeBridge } from '../src/pairing/extension';
+import { extensionFiles, extensionZip, nativeBridge, nativeRelay } from '../src/pairing/extension';
 
 const origin = 'https://pair.example.org',
   fp = 'https://companion-rust.facepunch.com';
@@ -131,10 +131,14 @@ describe('self-hosted pairing extension', () => {
     expect(tab).toBe(1);
     expect(options.documentId).toBe(site.documentId);
     expect(new URL(payload.address).searchParams.get('token')).toBe(auth.Token);
-    expect(Object.keys(w.storage)).toHaveLength(0);
+    expect(w.storage['rust-base:100']).toMatchObject({ delivered: true });
+    expect(w.chrome.tabs.remove).not.toHaveBeenCalled();
     expect(await w.message({ type: 'native', ...auth }, w.native())).toEqual({ ok: false });
     expect(w.chrome.tabs.sendMessage).toHaveBeenCalledOnce();
     expect(JSON.stringify(w.chrome.tabs.update.mock.calls)).not.toContain(auth.Token);
+    expect(await w.message({ type: 'finish' }, w.native())).toEqual({ ok: true });
+    expect(Object.keys(w.storage)).toHaveLength(0);
+    expect(w.chrome.tabs.remove).toHaveBeenCalledWith(100);
   });
   it('rejects unowned tabs, foreign sites, subframes and malformed login destinations', async () => {
     const w = worker();
@@ -222,35 +226,65 @@ describe('self-hosted pairing extension', () => {
     await w.message({ type: 'unknown' });
     expect(Object.keys(w.storage)).toHaveLength(0);
   });
+  it('reports failures only to the owned original website document and never closes an undelivered login', async () => {
+    const w = worker();
+    await w.message({ type: 'start', loginUrl });
+    expect(await w.message({ type: 'finish' }, w.native())).toEqual({ ok: false });
+    expect(w.chrome.tabs.remove).not.toHaveBeenCalled();
+    await w.message({ type: 'failed' }, w.native(999));
+    expect(w.chrome.tabs.sendMessage).not.toHaveBeenCalled();
+    await w.message({ type: 'failed' }, w.native());
+    expect(w.chrome.tabs.sendMessage).toHaveBeenCalledWith(
+      1,
+      { type: 'error' },
+      { documentId: site.documentId },
+    );
+    w.chrome.tabs.get.mockResolvedValueOnce({ url: 'https://evil.example/' });
+    await w.message({ type: 'failed' }, w.native());
+    expect(w.chrome.tabs.sendMessage).toHaveBeenCalledOnce();
+  });
 });
 
 describe('Facepunch native handoff bridge', () => {
-  function bridge(owned: boolean) {
-    let receive!: (event: object) => void;
+  function bridge(owned: boolean, relayFirst = false) {
     const values = new Map<string, string>();
+    class DomEvent {
+      readonly detail?: string;
+      constructor(
+        readonly type: string,
+        options?: { detail: string },
+      ) {
+        this.detail = options?.detail;
+      }
+    }
+    const listeners = new Map<string, ((event: DomEvent) => void)[]>();
     const window: {
       top?: unknown;
       ReactNativeWebView?: { postMessage: (message: string) => void };
       dispatchEvent: ReturnType<typeof vi.fn>;
-      addEventListener: (event: string, fn: typeof receive) => void;
+      addEventListener: (event: string, fn: (event: DomEvent) => void) => void;
     } = {
-      dispatchEvent: vi.fn(),
-      addEventListener: (_event, fn) => {
-        receive = fn;
+      dispatchEvent: vi.fn((event: DomEvent) => {
+        for (const listener of listeners.get(event.type) || []) listener(event);
+      }),
+      addEventListener: (event, fn) => {
+        listeners.set(event, [...(listeners.get(event) || []), fn]);
       },
     };
     window.top = window;
-    runInNewContext(nativeBridge, {
+    const sendMessage = vi
+      .fn<(message: { type: string }) => Promise<{ ok: boolean }>>()
+      .mockResolvedValue({ ok: true });
+    const warn = vi.fn();
+    const context = {
       window,
       URL,
       URLSearchParams,
       Date,
-      CustomEvent: class {
-        constructor(
-          readonly type: string,
-          readonly options: { detail: string },
-        ) {}
-      },
+      Event: DomEvent,
+      CustomEvent: DomEvent,
+      chrome: { runtime: { sendMessage } },
+      console: { warn },
       location: {
         origin: fp,
         hash: owned ? '#rust-base-bridge=0123456789abcdef0123456789abcdef' : '',
@@ -262,32 +296,70 @@ describe('Facepunch native handoff bridge', () => {
         removeItem: (key: string) => values.delete(key),
       },
       setTimeout: vi.fn(),
-    });
+    };
+    if (relayFirst) runInNewContext(nativeRelay, context);
+    runInNewContext(nativeBridge, context);
+    if (!relayFirst) runInNewContext(nativeRelay, context);
     return {
       window,
       values,
-      ready: () => receive({}),
+      sendMessage,
+      warn,
     };
   }
-  it('captures a single validated payload after the relay is ready without persisting tokens', () => {
-    const b = bridge(true);
+  it.each([false, true])(
+    'hands off and deduplicates when the isolated relay starts first: %s',
+    async (relayFirst) => {
+      const b = bridge(true, relayFirst);
+      b.window.ReactNativeWebView!.postMessage(JSON.stringify(auth));
+      b.window.ReactNativeWebView!.postMessage(JSON.stringify(auth));
+      await vi.waitFor(() => expect(b.sendMessage).toHaveBeenCalledWith({ type: 'finish' }));
+      expect(b.sendMessage).toHaveBeenCalledWith({ type: 'native', ...auth });
+      b.window.ReactNativeWebView!.postMessage(JSON.stringify(auth));
+      expect(b.sendMessage).toHaveBeenCalledTimes(2);
+      expect(b.values.size).toBe(0);
+      expect(b.warn).not.toHaveBeenCalled();
+    },
+  );
+  it('does not request tab closure until the worker acknowledges website delivery', async () => {
+    const b = bridge(true, true);
+    let acknowledge!: (value: { ok: boolean }) => void;
+    b.sendMessage.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          acknowledge = resolve;
+        }),
+    );
     b.window.ReactNativeWebView!.postMessage(JSON.stringify(auth));
-    expect(b.window.dispatchEvent).not.toHaveBeenCalled();
-    b.ready();
-    expect(b.window.dispatchEvent).toHaveBeenCalledWith({
-      type: 'rust-base-native',
-      options: { detail: JSON.stringify(auth) },
-    });
-    b.window.ReactNativeWebView!.postMessage(JSON.stringify(auth));
-    expect(b.window.dispatchEvent).toHaveBeenCalledOnce();
-    expect([...b.values.values()].join('')).not.toContain(auth.Token);
+    await Promise.resolve();
+    expect(b.sendMessage).toHaveBeenCalledTimes(1);
+    expect(b.values.size).toBe(1);
+    acknowledge({ ok: true });
+    await vi.waitFor(() => expect(b.sendMessage).toHaveBeenCalledWith({ type: 'finish' }));
+    expect(b.values.size).toBe(0);
   });
-  it('does not install a bridge in unrelated login tabs and ignores malformed auth', () => {
+  it.each([false, true])(
+    'reports a failed or closed message port and allows another explicit Continue: %s',
+    async (rejected) => {
+      const b = bridge(true);
+      if (rejected) b.sendMessage.mockRejectedValueOnce(new Error('message port closed'));
+      else b.sendMessage.mockResolvedValueOnce({ ok: false });
+      b.window.ReactNativeWebView!.postMessage(JSON.stringify(auth));
+      await vi.waitFor(() => expect(b.sendMessage).toHaveBeenCalledWith({ type: 'failed' }));
+      expect(b.sendMessage).not.toHaveBeenCalledWith({ type: 'finish' });
+      expect([...b.values.values()].join('')).not.toContain(auth.Token);
+      expect(JSON.stringify(b.warn.mock.calls)).not.toContain(auth.Token);
+      b.window.ReactNativeWebView!.postMessage(JSON.stringify(auth));
+      await vi.waitFor(() => expect(b.sendMessage).toHaveBeenCalledWith({ type: 'finish' }));
+    },
+  );
+  it('does not install a bridge in unrelated login tabs and reports malformed auth without exposing it', () => {
     expect(bridge(false).window.ReactNativeWebView).toBeUndefined();
     const b = bridge(true);
-    b.ready();
     b.window.ReactNativeWebView!.postMessage('not-json');
     b.window.ReactNativeWebView!.postMessage(JSON.stringify({ ...auth, SteamId: 'bad' }));
-    expect(b.window.dispatchEvent).not.toHaveBeenCalled();
+    expect(b.sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'native' }));
+    expect(b.sendMessage).toHaveBeenCalledWith({ type: 'failed' });
+    expect(JSON.stringify(b.warn.mock.calls)).not.toContain(auth.Token);
   });
 });
