@@ -61,7 +61,7 @@ it('clears the old view on movement, expires old motion samples and rebuilds det
   image.add(literal(1), 1999); // Packets queued before the movement must not restore the old view.
   expect(visible(image.render(2000, false).data)).toBe(0);
   image.add(literal(2), 2001);
-  expect(image.render(2001).width).toBe(4);
+  expect(image.render(2001).width).toBe(8);
   expect(visible(image.render(2001, false).data)).toBe(1);
   image.motion(true, 2300); // Heartbeats don't repeatedly erase current samples.
   expect(visible(image.render(2300, false).data)).toBe(1);
@@ -89,80 +89,66 @@ const pose = (overrides: Partial<CameraRays> = {}): CameraRays => ({
   cameraRotation: { x: 0, y: 0, z: 0 },
   ...overrides,
 });
-// Find a shuffled sample at a known screen coordinate independently of the pose math.
-function centreSample() {
-  for (let i = 0; i < 256; i++) {
-    const image = new RayImage(16, 16);
-    image.add(literal(i), 1000);
-    if (image.render(1000, false).data[(8 * 16 + 8) * 4 + 3] === 255) return i;
+it('keeps verified sample coordinates despite changing or invalid pose and sampling metadata', () => {
+  const reference = new RayImage(16, 16),
+    image = new RayImage(16, 16);
+  for (let i = 0; i < 64; i++) {
+    const frame = literal(i);
+    reference.add(frame, 1000 + i);
+    image.add(
+      pose({
+        ...frame,
+        cameraPosition: { x: i * 10, y: 0, z: NaN },
+        cameraRotation: { x: i * 90, y: 360 - i, z: 0 },
+        sampleRotation: { x: 0, y: -i * 40, z: 0 },
+        verticalFov: i % 2 ? 60 : 90,
+      }),
+      1000 + i,
+    );
+    expect(image.render(1000 + i, false).data).toEqual(reference.render(1000 + i, false).data);
   }
-  throw new Error('Missing centre sample.');
-}
-function singlePoint() {
-  const image = new RayImage(16, 16);
-  // A non-zero known distance is required for drone translation tests.
-  image.add(pose({ sampleOffset: centreSample(), rayData: Buffer.from([255, 128, 63, 3]) }), 1000);
-  return image;
-}
-function point(image: RayImage, now: number) {
-  const data = image.render(now, false).data;
-  const index = Array.from(data).findIndex((v, i) => i % 4 === 3 && v === 255);
-  return index < 0 ? -1 : (index - 3) / 4;
-}
-it('preserves stationary detail and reprojects a known point left when the camera pans right', () => {
-  const image = singlePoint();
-  expect(point(image, 1000)).toBe(8 * 16 + 8);
-  image.motion(true, 1001);
-  expect(image.render(1001).width).toBe(16);
-  image.add(pose({ cameraRotation: { x: 0, y: 10, z: 0 } }), 1050);
-  expect(image.render(1050).mode).toBe('pose');
-  expect(point(image, 1050) % 16).toBeLessThan(8);
-  expect(Math.floor(point(image, 1050) / 16)).toBe(8);
-  image.motion(false, 1060);
-  expect(visible(image.render(1060, false).data)).toBe(1);
+  expect(image.render(1100).mode).toBe('spatial');
 });
-it('reprojects drone translation, rejects points behind the camera and never extends sample age', () => {
-  const image = singlePoint();
-  image.add(pose({ cameraPosition: { x: 10, y: 0, z: 0 } }), 1100);
-  expect(point(image, 1100) % 16).toBeLessThan(8);
-  image.add(pose({ cameraPosition: { x: 11, y: 0, z: 0 } }), 1700);
-  expect(visible(image.render(1700, false).data)).toBe(1);
-  image.add(pose({ cameraPosition: { x: 12, y: 0, z: 0 } }), 1801);
-  expect(visible(image.render(1801, false).data)).toBe(0);
-  const turned = singlePoint();
-  turned.add(pose({ cameraRotation: { x: 0, y: 180, z: 0 } }), 1100);
-  expect(visible(turned.render(1100, false).data)).toBe(0);
-});
-it('places jittered samples in the display orientation and handles FOV changes', () => {
-  const image = new RayImage(16, 16);
-  image.add(
-    pose({
-      sampleOffset: centreSample(),
-      rayData: Buffer.from([255, 128, 63, 3]),
-      sampleRotation: { x: 0, y: 10, z: 0 },
-    }),
-    1000,
-  );
-  expect(point(image, 1000) % 16).toBeGreaterThan(8);
-  const before = point(image, 1000) % 16;
-  image.add(pose({ verticalFov: 60 }), 1100);
-  expect(point(image, 1100) % 16).toBeGreaterThanOrEqual(before);
-});
-it('falls back safely on missing or invalid pose, clearing incompatible accumulated samples', () => {
-  const image = singlePoint();
+it('preserves stationary coverage while metadata appears, disappears or changes', () => {
+  const image = new RayImage(8, 8);
+  for (let i = 0; i < 64; i++) image.add({ ...pose(), ...literal(i) }, 1000);
   image.add(literal(0), 1100);
-  expect(image.render(1100, false).mode).toBe('spatial');
-  expect(visible(image.render(1100, false).data)).toBe(1);
-  image.add(pose({ cameraPosition: { x: NaN, y: 0, z: 0 }, ...literal(1) }), 1200);
-  expect(image.render(1200, false).mode).toBe('spatial');
-  image.add(pose({ ...literal(2) }), 1300);
-  expect(image.render(1300, false).mode).toBe('pose');
-  expect(visible(image.render(1300, false).data)).toBe(1);
+  image.add({ ...pose({ cameraRotation: { x: NaN, y: 0, z: 0 } }), ...literal(1) }, 1200);
+  expect(visible(image.render(1200, false).data)).toBe(64);
 });
-it('uses the newest packet window while moving without pose, rather than mixing older views', () => {
+it('reduces sparse moving-image holes with bounded spatial reconstruction at fixed native dimensions', () => {
+  const image = new RayImage(160, 90);
+  image.motion(true, 1000);
+  for (let i = 0; i < 1000; i++) image.add({ ...pose(), ...literal(i) }, 1001);
+  const raw = image.render(1001, false),
+    smooth = image.render(1001);
+  expect([smooth.width, smooth.height]).toEqual([160, 90]);
+  expect(visible(raw.data)).toBe(1000);
+  expect(visible(smooth.data)).toBeGreaterThan(160 * 90 * 0.99);
+  // Reconstruction cannot revive expired samples or invent coverage with no rays.
+  expect(visible(image.render(1302).data)).toBe(0);
+  image.motion(false, 1400);
+  image.add(literal(1), 1401);
+  expect([image.render(1401).width, image.render(1401).height]).toEqual([160, 90]);
+});
+it('retains a short recent packet window during movement instead of only one packet', () => {
   const image = new RayImage(8, 8);
   image.motion(true, 1000);
   image.add(literal(0), 1001);
   image.add(literal(1), 1100);
-  expect(visible(image.render(1100, false).data)).toBe(1);
+  expect(visible(image.render(1100, false).data)).toBe(2);
+  image.add(literal(2), 1200);
+  expect(visible(image.render(1200, false).data)).toBe(2);
+});
+it('interpolates moving-image colours without painting unsampled areas black or erasing actual black regions', () => {
+  const image = new RayImage(16, 16);
+  image.motion(true, 1000);
+  for (let i = 0; i < 256; i++) image.add(literal(i, i % 2 ? 63 : 0), 1001);
+  const data = image.render(1001).data;
+  expect(visible(data)).toBe(256);
+  expect(Array.from(data).some((v, i) => i % 4 === 0 && v > 0 && v < 153)).toBe(true);
+  const black = new RayImage(16, 16);
+  black.motion(true, 1000);
+  for (let i = 0; i < 256; i++) black.add(literal(i, 0), 1001);
+  expect(black.render(1001).data.every((v, i) => (i % 4 === 3 ? v === 255 : v === 0))).toBe(true);
 });

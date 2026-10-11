@@ -18,7 +18,7 @@ it('renders synthetic rays using the upstream-compatible codec in a worker', asy
     renderer?.stop();
   }
 });
-it('switches the worker to recent half-resolution samples during movement and restores native detail', async () => {
+it('keeps native PNG dimensions during motion and after stopping', async () => {
   let next: ((png: Buffer) => void) | undefined;
   const renderer = new CameraRenderer(
     { width: 8, height: 8, nearPlane: 0, farPlane: 100, controlFlags: 7 },
@@ -35,7 +35,7 @@ it('switches the worker to recent half-resolution samples during movement and re
   try {
     expect((await render()).readUInt32BE(16)).toBe(8);
     renderer.motion(true);
-    expect((await render()).readUInt32BE(16)).toBe(4);
+    expect((await render()).readUInt32BE(16)).toBe(8);
     renderer.motion(false);
     expect((await render()).readUInt32BE(16)).toBe(8);
   } finally {
@@ -71,7 +71,7 @@ it('rejects excessive dimensions before creating a worker', () => {
       ),
   ).toThrow('dimensions');
 });
-it('retains prototype-default zero pose components across worker cloning and uses native motion detail', async () => {
+it('keeps stable ray rendering when newer servers provide pose metadata', async () => {
   let renderer: CameraRenderer | undefined;
   try {
     const result = await new Promise<{ png: Buffer; mode?: string }>((resolve, reject) => {
@@ -94,7 +94,7 @@ it('retains prototype-default zero pose components across worker cloning and use
         sampleRotation: { x: 0, y: 10, z: 0 },
       });
     });
-    expect(result.mode).toBe('pose');
+    expect(result.mode).toBe('spatial');
     expect(result.png.readUInt32BE(16)).toBe(8);
   } finally {
     renderer?.stop();

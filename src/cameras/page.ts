@@ -29,7 +29,7 @@ function status(status) {
     $('status').textContent = fresh ? 'Live Rust+ view' : 'Waiting for fresh camera data…';
     while (shown.length && shown[0] <= Date.now() - 5000) shown.shift();
     const age = value => value === null ? 'waiting' : (value / 1000).toFixed(1) + 's';
-    $('metrics').textContent = 'Rust ray packets: ' + status.rayFps.toFixed(1) + '/s · Render: ' + status.renderFps.toFixed(1) + ' FPS · Display: ' + (shown.length / 5).toFixed(1) + ' FPS · Last ray: ' + age(status.rayAge) + ' · Frame age: ' + age(status.frameAge) + ' · ' + (status.rendering === 'pose' ? 'Motion reconstruction' : 'Basic reconstruction');
+    $('metrics').textContent = 'Rust ray packets: ' + status.rayFps.toFixed(1) + '/s · Render: ' + status.renderFps.toFixed(1) + ' FPS · Display: ' + (shown.length / 5).toFixed(1) + ' FPS · Last ray: ' + age(status.rayAge) + ' · Frame age: ' + age(status.frameAge) + ' · ' + 'Stable ray reconstruction';
     if (!fresh) { feed.hidden = true; if (keys.size) release(); }
     buttons();
 }
