@@ -9,6 +9,27 @@ const schema = z
     DISCORD_GUILD_ID: snowflake,
     ADMIN_USER_ID: snowflake,
     PAIRING_HELPER_URL: z.url().startsWith('https://').max(512).optional(),
+    PAIRING_WEB_URL: z
+      .url()
+      .max(512)
+      .refine((value) => {
+        try {
+          const url = new URL(value);
+          return (
+            url.protocol === 'https:' &&
+            !url.username &&
+            !url.password &&
+            !url.search &&
+            !url.hash &&
+            url.pathname === '/'
+          );
+        } catch {
+          return false;
+        }
+      }, 'Use an HTTPS origin, e.g. https://pair.example.com')
+      .optional(),
+    PAIRING_WEB_HOST: z.string().default('127.0.0.1'),
+    PAIRING_WEB_PORT: z.coerce.number().int().min(1).max(65535).default(3080),
     RUST_SERVER_IP: z.string().regex(/^[a-zA-Z0-9.-]+$/),
     RUST_APP_PORT: z.coerce.number().int().min(1).max(65535),
     RUST_STEAM_ID: z.string().regex(/^\d{17}$/),

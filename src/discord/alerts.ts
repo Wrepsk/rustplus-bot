@@ -1,8 +1,9 @@
-import { Client, EmbedBuilder, escapeMarkdown } from 'discord.js';
+import { Client, escapeMarkdown } from 'discord.js';
 import type { Config } from '../config';
 import type { Notification, Store } from '../database';
 import type { Device } from '../domain';
 import { log, errorCode } from '../log';
+import { card } from './ui';
 
 export class AlertDeliveryError extends Error {
   constructor(
@@ -168,8 +169,7 @@ export class Alerts {
       // Operational/recovery warnings never masquerade as raid alerts or ping the raid role.
       await channel.send({
         embeds: [
-          new EmbedBuilder()
-            .setTitle(notification.title)
+          card(notification.title)
             .setFooter({ text: this.config.BASE_NAME })
             .setDescription(notification.description)
             .setColor(notification.title.startsWith('✅') ? 0x42b883 : 0xe5a742)
@@ -193,8 +193,11 @@ export class Alerts {
       await channel.send({
         content: role ? `<@&${role}>` : undefined,
         embeds: [
-          new EmbedBuilder()
-            .setTitle(simulated ? '🧪 SIMULATED RAID ALERT' : '🚨 RAID ALERT!')
+          card(
+            simulated ? '🧪 SIMULATED RAID ALERT' : '🚨 RAID ALERT!',
+            undefined,
+            this.config.BASE_NAME,
+          )
             .setColor(simulated ? 0xe5a742 : 0xed4245)
             .addFields(
               { name: 'Base', value: escapeMarkdown(this.config.BASE_NAME) },

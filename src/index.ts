@@ -76,7 +76,7 @@ async function main(): Promise<void> {
   } catch (error) {
     log.error(
       { code: errorCode(error) },
-      'Startup failed; verify Discord credentials and application permissions',
+      'Startup failed; verify Discord credentials, application permissions and pairing website bind address/port',
     );
     await shutdown(1);
   }

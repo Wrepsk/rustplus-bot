@@ -1,19 +1,64 @@
 # Rust+ Discord Base Bot
 
-A self-hosted, multi-server / single-guild bot for your friends: native Discord base controls, real Smart Alarm notifications and two-way Rust team chat using each member's personal Rust+ identity. TypeScript, discord.js 14.27.0, rustplus.js 2.5.0 and SQLite. No hosted website, inbound HTTP listener or hosted database.
+A self-hosted, multi-server / single-guild bot for your friends: native Discord base controls, real Smart Alarm notifications and two-way Rust team chat using each member's personal Rust+ identity. TypeScript, discord.js 14.27.0, rustplus.js 2.5.0 and SQLite. An optional pairing page runs on your own VPS behind your HTTPS reverse proxy. No external hosted database or dashboard is required.
 
 ## Existing installation: easier pairing and multiple servers
 
 Your current `.env`, SQLite registrations, alerts, roles and panel IDs continue to work. The original server becomes profile `default`; the configured administrator's existing Rust+ pairing is imported as their personal chat identity once. **Other Discord members must now link their own Rust+ pairing to send chat. There is no shared-account fallback.** Rust-to-Discord chat remains available without linking every reader.
 
-Back up the **entire** data volume before upgrading, then rebuild/recreate the image. The first run creates `/app/data/credentials.key` (local: beside `DATABASE_PATH`) and additional databases in `servers/` beside the original database. Newly imported server, FCM and personal player credentials are encrypted with this key. Keep the key with private backups: losing it makes saved credentials unreadable. Steam passwords, Steam Guard codes, cookies and the upstream companion auth token are never transferred to the bot. Existing `.env` secrets remain in `.env`.
+Back up the **entire** data volume before upgrading, then rebuild/recreate the image. The first run creates `/app/data/credentials.key` (local: beside `DATABASE_PATH`) and additional databases in `servers/` beside the original database. Newly imported server, FCM and personal player credentials are encrypted with this key. Keep the key with private backups: losing it makes saved credentials unreadable. Steam passwords, Steam Guard codes and cookies are never transferred to the bot. Browser pairing temporarily sends a Rust+ companion auth token to your VPS solely for push registration; it is not logged or persisted. Existing `.env` secrets remain in `.env`.
+
+### Recommended: pair through your own HTTPS website
+
+Friends need only Discord, their normal browser and Rust. `/pair start` opens a private website link. They sign in on **Facepunch/Steam's own page**, copy the resulting localhost address back into your pairing page, and paste its **encrypted** `/pair import` command into Discord. After `/pair status` shows listening, pair in-game and open `/pair inbox`. Each incoming item has **Accept** / **Decline** buttons; Accept opens a naming dialog, including a destructive-equipment choice for switches. Decline removes only the pending entry, not an existing registration. Existing slash commands remain available.
+
+**Why the copy/paste step?** Facepunch's companion login supports an app hook and a loopback redirect, rather than a general website OAuth callback. A normal remotely hosted website cannot read the localhost redirect. After Steam login, an expected **“can't connect”** page appears at `http://localhost:.../callback/...?...`. Copy its **entire address bar URL** into the pairing page. Do not paste that raw address into Discord, support messages, logs or screenshots: it contains a temporary Rust+ token. The website checks the unique callback/nonce before registration. Steam OpenID alone cannot authorize Rust+ chat.
+
+The loopback flow is documented in [RustPlusApi's credential guide](https://github.com/HandyS11/RustPlusApi/blob/develop/docs/articles/credentials.md). Registration uses the installed rustplus.js 2.5.0 CLI's FCM/Expo/companion protocol. This is unofficial and still needs a real Steam/Rust smoke test in your environment; if Facepunch changes the redirect behavior, the desktop helper remains available.
+
+Owner setup, once (existing domain + HTTPS required):
+
+1. Back up your data volume. Put the updated code on the VPS and keep your existing working Docker security/execution settings.
+2. Set `PAIRING_WEB_URL=https://pair.example.com` in the VPS `.env`, replacing the example with **your HTTPS hostname**. Use an origin only, without a path, query or fragment. A dedicated subdomain is recommended. Leave the variable blank to disable the website and keep the desktop flow. `PAIRING_HELPER_URL` remains an optional fallback.
+3. Build/start using the optional Compose override. It binds port 3080 to **host loopback only**, for a reverse proxy running on the VPS:
+
+   ```sh
+   sudo docker compose -f docker-compose.yml -f docker-compose.web.yml config --quiet
+   sudo docker compose -f docker-compose.yml -f docker-compose.web.yml up -d --build --force-recreate rust-bot
+   sudo docker compose -f docker-compose.yml -f docker-compose.web.yml logs -f --tail=50 rust-bot
+   ```
+
+   Use both `-f` files for later updates/recreation too. The named data volume is unchanged. Do not open port 3080 publicly. The bot logs that its pairing website is listening; it remains usable for controls/chat when no pairing is underway.
+
+4. Forward the **root of that HTTPS hostname** to `http://127.0.0.1:3080`. Preserve the browser's `Host` and `Origin`. For an existing Nginx TLS server block:
+
+   ```nginx
+   # Inside your existing server { listen 443 ssl; server_name pair.example.com; ... }
+   location / {
+       proxy_pass http://127.0.0.1:3080;
+       proxy_set_header Host $host;
+       proxy_set_header X-Forwarded-Proto $scheme;
+       proxy_read_timeout 90s;
+       client_max_body_size 16k;
+   }
+   ```
+
+   Validate/reload using your normal Nginx procedure (`sudo nginx -t`, then `sudo systemctl reload nginx`). For Caddy, an equivalent hostname block is `pair.example.com { reverse_proxy 127.0.0.1:3080 }`. If the proxy itself is a container, attach it to the bot's Docker network and use `rust-bot:3080` instead of the proxy container's own loopback. Preserve your existing certificates and redirect HTTP to HTTPS.
+
+5. Open your HTTPS URL to check the page, then run `/pair start` in Discord and use **Open pairing website**. Test with your own account before inviting friends. A bot restart, a new `/pair start`, import, or unlink invalidates an old code. Codes expire after 15 minutes.
+
+Do not enable reverse-proxy request-body capture/debug tracing or browser analytics for this page. The app logs no pasted addresses/tokens and sends `no-store`, `no-referrer`, strict CSP and secure HttpOnly session cookies. Registration runs in bounded workers (maximum two, 60-second deadline); failures do not block Rust connections. Temporary sessions/results live only in memory. Failed upstream registration is reported without raw error bodies. Existing dependency advisories still apply to the registration stack; see [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
+
+Discord panels now share consistent server context and styling. `/server list` has a default-server dropdown and administrator pause/resume buttons. `/device list` and `/alarm list` have pagination, selection, state refresh, rename dialogs and confirmed registration removal; alarms also have notification/test buttons. `/chat status` has administrator enable/disable buttons. `/status` has a refresh button. Controls always fetch current permissions. Device removal is bot-side deregistration; physical Rust pairing/access is managed in-game. `/pair status` includes a confirmed personal-account unlink button.
+
+### Desktop helper fallback
 
 1. Run `/pair start` in Discord. It returns a private pairing code valid for 15 minutes and a **Download Windows pairing helper** button when the owner has configured its download URL.
 2. Download the helper ZIP, choose **Extract all**, open the extracted folder and double-click **RustPlus Pairing.cmd**. Your friends do **not** need this repository, Node.js, npm, a terminal, a Discord bot token or administrator access. Windows 10/11 x64 and Google Chrome are required; Node.js and dependencies are included in the ZIP.
 3. Paste the Discord code into the helper and click **Link account**. If needed, Chrome opens the upstream Rust Companion/Steam login flow. Log in on Steam's page. Click **Copy Discord command**, paste into Discord and send. Only encrypted credential data travels through Discord. Raw tokens are not displayed by the helper.
 4. Close any local `fcm-listen` using that registration. The **VPS** now keeps the FCM listener running, including after restarts. Check `/pair status` for `listening` before pairing in-game. Allow outbound TCP **5228** to `mtalk.google.com` and outbound HTTPS as appropriate; no inbound VPS ports are required.
 5. In Rust, click **Pair with Server**. Run `/pair inbox`, then `/pair accept id:<pairing-id>`. Administrators can add monitored servers; operators can link only to existing servers. Chat checks that your Steam account belongs to the mirrored Rust team before dispatch.
-6. For a Smart Switch/Alarm, use **Pair** on the device in-game, then `/pair inbox` and `/pair accept id:<pairing-id> name:Garage`. Devices require administrator approval. Set `sensitive:true` for destructive equipment. Pairing only registers/queries the device; it never activates it. Existing registrations are retained; rename them with `/device rename`.
+6. For a Smart Switch/Alarm, use **Pair** on the device in-game, then `/pair inbox` and Accept, or `/pair accept id:<pairing-id> name:Garage`. Devices require administrator approval. Choose **yes** for destructive equipment in the dialog, or set `sensitive:true` in the command. Pairing only registers/queries the device; it never activates it. Reaccepting an existing registration can update its name and add a safety flag, but never clears an existing safety flag.
 
 This removes the recurring need to run `fcm-listen` or copy raw IDs/tokens. Browser sign-in and the in-game Pair action remain necessary. Close the helper after import. If FCM reports `invalid-credentials` or you want another Steam account, get a new `/pair start` code and check **Sign in again** in the helper. Inbox pairings are private, deduplicated and expire after 24 hours. The helper stores only the local FCM listener registration in `%LOCALAPPDATA%\RustPlusDiscordPairing\rustplus.config.json` after a successful run; **Reset local registration** removes that file. Use `/pair unlink` to remove credentials on the bot as well.
 
@@ -38,7 +83,7 @@ Upload the helper ZIP to a GitHub Release or another HTTPS download location you
 PAIRING_HELPER_URL=https://github.com/YOUR-OWNER/YOUR-REPO/releases/download/YOUR-TAG/RustPlus-Pairing-Windows-x64.zip
 ```
 
-Use the actual published file URL, not GitHub's source-code ZIP. Rebuild/update the bot and recreate it with `docker compose up -d --build --force-recreate rust-bot`. `/pair start` now shows the download button. The URL is optional: without it, the bot asks friends to get the helper ZIP from the owner rather than displaying an unavailable link. You can share the same built ZIP directly instead, if your file-sharing destination supports its size. There is no hosted login website or inbound VPS port.
+Use the actual published file URL, not GitHub's source-code ZIP. Rebuild/update the bot and recreate it with `docker compose up -d --build --force-recreate rust-bot` (include the web override if enabled). `/pair start` now shows the download button, or a fallback download alongside website pairing. The URL is optional: without either pairing URL, the bot asks friends to get the helper ZIP from the owner. You can share the same built ZIP directly instead. Desktop-only mode has no inbound HTTP listener.
 
 The desktop helper reuses the installed rustplus.js registration CLI. Its packaged copy binds the temporary port-3000 login callback to loopback and uses chrome-launcher's isolated temporary browser profile rather than upstream's hardcoded Unix profile path. The upstream login flow relaxes browser security for that dedicated Chrome session; use it only for pairing and close it when finished. Raw upstream stdout/stderr are suppressed. Failed or cancelled sign-in gets a visible error/timeout, and closing the helper stops its registration process tree. Windows organization policies that forbid PowerShell scripts may block this portable helper; use a personal PC where scripts are permitted. It needs no elevation.
 
@@ -137,16 +182,19 @@ On PowerShell use `Copy-Item .env.example .env`. For development use `npm run de
 
 Optional settings:
 
-| Variable                             | Default / meaning                                                    |
-| ------------------------------------ | -------------------------------------------------------------------- |
-| `DATABASE_PATH`                      | `./data/bot.sqlite`; overridden to `/app/data/bot.sqlite` in Compose |
-| `ALLOWED_ROLE_IDS`                   | Empty: administrators only. Comma-separated initial operator roles   |
-| `ALERT_CHANNEL_ID` / `ALERT_ROLE_ID` | Optional initial alert channel and role                              |
-| `BASE_NAME`                          | Main Base                                                            |
-| `ALARM_COOLDOWN_SECONDS`             | 60; per alarm, persisted across restarts                             |
-| `CHAT_POLL_SECONDS`                  | 30; minimum 10                                                       |
-| `RUST_CHAT_MAX_LENGTH`               | 128 UTF-16 units; adjustable down to 64 for stricter servers         |
-| `LOG_LEVEL`                          | info; structured JSON to stdout                                      |
+| Variable                                | Default / meaning                                                                       |
+| --------------------------------------- | --------------------------------------------------------------------------------------- |
+| `DATABASE_PATH`                         | `./data/bot.sqlite`; overridden to `/app/data/bot.sqlite` in Compose                    |
+| `ALLOWED_ROLE_IDS`                      | Empty: administrators only. Comma-separated initial operator roles                      |
+| `ALERT_CHANNEL_ID` / `ALERT_ROLE_ID`    | Optional initial alert channel and role                                                 |
+| `BASE_NAME`                             | Main Base                                                                               |
+| `ALARM_COOLDOWN_SECONDS`                | 60; per alarm, persisted across restarts                                                |
+| `CHAT_POLL_SECONDS`                     | 30; minimum 10                                                                          |
+| `RUST_CHAT_MAX_LENGTH`                  | 128 UTF-16 units; adjustable down to 64 for stricter servers                            |
+| `LOG_LEVEL`                             | info; structured JSON to stdout                                                         |
+| `PAIRING_WEB_URL`                       | Empty: website disabled. HTTPS origin for your self-hosted pairing page                 |
+| `PAIRING_WEB_HOST` / `PAIRING_WEB_PORT` | `127.0.0.1` / `3080`; web Compose override binds container 0.0.0.0 behind host loopback |
+| `PAIRING_HELPER_URL`                    | Optional HTTPS download of the desktop helper ZIP; website fallback                     |
 
 Settings changed through Discord are saved in SQLite and override the corresponding **initial** environment role/alert defaults. The database is bound to the Rust server and player identity to prevent accidental control of unrelated entities when changing servers. Use a separate database/volume for a different server or Steam account.
 

@@ -6,6 +6,7 @@ import { listenerSchema, pairingSchema, type Pairing } from './schema';
 import { PairingListener } from './listener';
 
 interface Session {
+  code: string;
   user: string;
   expires: number;
   privateKey: string;
@@ -32,11 +33,17 @@ export class PairingService {
     if (this.sessions.size >= 50) throw new Error('Pairing is busy; retry shortly.');
     const challenge = pairingChallenge();
     this.sessions.set(challenge.code.split('.')[0], {
+      code: challenge.code,
       user,
       expires: Date.now() + 15 * 60000,
       privateKey: challenge.privateKey,
     });
     return challenge.code;
+  }
+  isChallengeActive(code: string): boolean {
+    if (code.length > 200) return false;
+    const session = this.sessions.get(code.split('.')[0]);
+    return !!session && session.code === code && session.expires > Date.now();
   }
   import(user: string, data: string): void {
     const id = data.split('.')[0],

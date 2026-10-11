@@ -113,6 +113,241 @@ function emit(interaction: unknown) {
 function output(interaction: ReturnType<typeof command>) {
   return interaction.editReply.mock.calls.map(([payload]) => JSON.stringify(payload)).join('\n');
 }
+function component(
+  customId: string,
+  user = 'owner',
+  kind: 'button' | 'modal' | 'select' = 'button',
+  values: Record<string, string> = {},
+) {
+  const interaction = Object.assign(command('', '', {}, user), {
+    customId,
+    message: { id: 'private-message' },
+    isChatInputCommand: () => false,
+    isButton: () => kind === 'button',
+    isModalSubmit: () => kind === 'modal',
+    isStringSelectMenu: () => kind === 'select',
+    isFromMessage: () => true,
+    values: [values.selected],
+    fields: { getTextInputValue: (key: string) => values[key] || '' },
+    showModal: vi.fn(async (_value: unknown) => {
+      void _value;
+    }),
+    followUp: vi.fn(async (_value: unknown) => {
+      void _value;
+    }),
+    deferUpdate: vi.fn(async () => {
+      interaction.deferred = true;
+    }),
+  });
+  return interaction;
+}
+describe('interactive pairing and management panels', () => {
+  it('does not alter a registration while a switch operation is running', async () => {
+    const sessions = (
+      host as unknown as { sessions: Map<string, { bot: { devices: { busy: Set<string> } } }> }
+    ).sessions;
+    sessions.get(second)!.bot.devices.busy.add('42');
+    const remove = component(`view:${second}:owner:device:remove-confirm:42`);
+    emit(remove);
+    await vi.waitFor(() => expect(remove.editReply).toHaveBeenCalled());
+    expect(output(remove)).toContain('request for this device is running');
+    expect(servers.store(second).devices()).toHaveLength(1);
+    sessions.get(second)!.bot.devices.busy.delete('42');
+  });
+  it('toggles chat and alarm settings through the UI with fresh administrator checks', async () => {
+    const enable = component(`view:${second}:owner:chat:enable:0`);
+    emit(enable);
+    await vi.waitFor(() => expect(enable.editReply).toHaveBeenCalled());
+    expect(servers.store(second).get('chatEnabled', false)).toBe(true);
+    const denied = component(`view:${second}:friend:chat:disable:0`, 'friend');
+    emit(denied);
+    await vi.waitFor(() => expect(denied.editReply).toHaveBeenCalled());
+    expect(servers.store(second).get('chatEnabled', false)).toBe(true);
+    servers.store(second).add({ id: '77', name: 'Outer wall', type: 'alarm' });
+    const disable = component(`view:${second}:owner:alarm:disable:77`);
+    emit(disable);
+    await vi.waitFor(() => expect(disable.editReply).toHaveBeenCalled());
+    expect(servers.store(second).device('77').enabled).toBe(false);
+    const restore = component(`view:${second}:owner:alarm:enable:77`);
+    emit(restore);
+    await vi.waitFor(() => expect(restore.editReply).toHaveBeenCalled());
+    expect(servers.store(second).device('77').enabled).toBe(true);
+  });
+  it('makes website pairing the primary no-install experience when configured', async () => {
+    config.PAIRING_WEB_URL = 'https://pair.example.org';
+    const start = command('pair', 'start', {}, 'friend');
+    emit(start);
+    await vi.waitFor(() => expect(start.editReply).toHaveBeenCalled());
+    expect(output(start)).toContain('Open pairing website');
+    expect(output(start)).toContain('https://pair.example.org/#code=');
+    expect(output(start)).not.toContain('npm');
+    expect(output(start)).not.toContain('RustPlus Pairing.cmd');
+  });
+  it('paginates private inboxes within Discord limits and opens a naming modal', async () => {
+    for (let i = 0; i < 6; i++)
+      host.pairing.receive('owner', {
+        type: 'entity',
+        ip: secondPairing.ip,
+        port: secondPairing.port,
+        entityId: String(100 + i),
+        entityType: 1,
+        entityName: `Lights ${i}`,
+      });
+    const inbox = command('pair', 'inbox');
+    emit(inbox);
+    await vi.waitFor(() => expect(inbox.editReply).toHaveBeenCalled());
+    const payload = inbox.editReply.mock.calls[0][0] as { components: unknown[] };
+    expect(payload.components).toHaveLength(5);
+    expect(output(inbox)).toContain('Accept 1');
+    expect(output(inbox)).toContain('Decline 1');
+    const id = host.pairing.inbox('owner')[0].id;
+    const accept = component(`pairui:accept:owner:${id}:0`);
+    emit(accept);
+    await vi.waitFor(() => expect(accept.showModal).toHaveBeenCalled());
+    expect(JSON.stringify(accept.showModal.mock.calls[0][0])).toContain('Friendly name');
+    expect(host.pairing.inbox('owner')).toHaveLength(6);
+  });
+  it('saves names and sensitive switches without activating devices; rejects replay', async () => {
+    host.pairing.receive('owner', {
+      type: 'entity',
+      ip: secondPairing.ip,
+      port: secondPairing.port,
+      entityId: '99',
+      entityType: 1,
+    });
+    const id = host.pairing.inbox('owner')[0].id;
+    const control = vi.spyOn(Connection.prototype, 'setSwitch');
+    const save = component(`pairui:save:owner:${id}:0`, 'owner', 'modal', {
+      name: 'Workshop power',
+      sensitive: 'yes',
+    });
+    emit(save);
+    await vi.waitFor(() => expect(save.editReply).toHaveBeenCalled());
+    expect(servers.store(second).device('99')).toMatchObject({
+      name: 'Workshop power',
+      sensitive: true,
+    });
+    expect(control).not.toHaveBeenCalled();
+    expect(host.pairing.inbox('owner')).toHaveLength(0);
+    const replay = component(save.customId, 'owner', 'modal', { name: 'Other', sensitive: 'no' });
+    emit(replay);
+    await vi.waitFor(() => expect(replay.followUp).toHaveBeenCalled());
+    expect(servers.store(second).device('99').name).toBe('Workshop power');
+  });
+  it('renames an existing pairing and never downgrades an existing safety flag', async () => {
+    servers.store(second).markSensitive('42');
+    host.pairing.receive('owner', {
+      type: 'entity',
+      ip: secondPairing.ip,
+      port: secondPairing.port,
+      entityId: '42',
+      entityType: 1,
+    });
+    const id = host.pairing.inbox('owner')[0].id;
+    const save = component(`pairui:save:owner:${id}:0`, 'owner', 'modal', {
+      name: 'New name',
+      sensitive: 'no',
+    });
+    emit(save);
+    await vi.waitFor(() => expect(save.editReply).toHaveBeenCalled());
+    expect(servers.store(second).device('42')).toMatchObject({ name: 'New name', sensitive: true });
+  });
+  it('rejects stolen inbox buttons and administrative pairing by ordinary operators', async () => {
+    host.pairing.receive('owner', secondPairing);
+    const id = host.pairing.inbox('owner')[0].id;
+    const stolen = component(`pairui:decline:owner:${id}:0`, 'friend');
+    emit(stolen);
+    await vi.waitFor(() => expect(stolen.reply).toHaveBeenCalled());
+    expect(host.pairing.inbox('owner')).toHaveLength(1);
+    host.pairing.receive('friend', {
+      type: 'entity',
+      ip: secondPairing.ip,
+      port: secondPairing.port,
+      entityId: '99',
+      entityType: 1,
+    });
+    const own = host.pairing.inbox('friend')[0].id;
+    const accept = component(`pairui:accept:friend:${own}:0`, 'friend');
+    emit(accept);
+    await vi.waitFor(() => expect(accept.reply).toHaveBeenCalled());
+    expect(accept.showModal).not.toHaveBeenCalled();
+    expect(servers.store(second).devices()).toHaveLength(1);
+  });
+  it('checks fresh roles again when a server pairing modal is submitted', async () => {
+    host.pairing.receive('friend', {
+      ...secondPairing,
+      playerId: '76561198000000002',
+      playerToken: '999',
+    });
+    const id = host.pairing.inbox('friend')[0].id;
+    const accept = component(`pairui:accept:friend:${id}:0`, 'friend');
+    emit(accept);
+    await vi.waitFor(() => expect(accept.showModal).toHaveBeenCalled());
+    role = [];
+    const save = component(`pairui:save:friend:${id}:0`, 'friend', 'modal', { name: 'Server' });
+    emit(save);
+    await vi.waitFor(() => expect(save.followUp).toHaveBeenCalled());
+    expect(servers.identity(second, 'friend')).toBeUndefined();
+  });
+  it('declines only the selected entry and selects servers using a dropdown', async () => {
+    host.pairing.receive('owner', secondPairing);
+    host.pairing.receive('friend', secondPairing);
+    const id = host.pairing.inbox('owner')[0].id;
+    const decline = component(`pairui:decline:owner:${id}:0`);
+    emit(decline);
+    await vi.waitFor(() => expect(decline.editReply).toHaveBeenCalled());
+    expect(host.pairing.inbox('owner')).toHaveLength(0);
+    expect(host.pairing.inbox('friend')).toHaveLength(1);
+    const select = component('servers:select:friend', 'friend', 'select', { selected: second });
+    emit(select);
+    await vi.waitFor(() => expect(select.editReply).toHaveBeenCalled());
+    expect(servers.selected('friend')).toBe(second);
+    expect(servers.get('default').enabled).toBe(true);
+  });
+  it('requires administrator access for dropdown server pause controls', async () => {
+    const pause = component(`servers:pause:friend:${second}`, 'friend');
+    emit(pause);
+    await vi.waitFor(() => expect(pause.followUp).toHaveBeenCalled());
+    expect(servers.get(second).enabled).toBe(true);
+  });
+  it('routes device rename modals to the correct server with fresh admin checks', async () => {
+    const rename = component(`view:${second}:owner:device:rename:42`);
+    emit(rename);
+    await vi.waitFor(() => expect(rename.showModal).toHaveBeenCalled());
+    const save = component(`view:${second}:owner:device:rename-save:42`, 'owner', 'modal', {
+      name: 'Roof lights',
+    });
+    emit(save);
+    await vi.waitFor(() => expect(save.editReply).toHaveBeenCalled());
+    expect(servers.store(second).device('42').name).toBe('Roof lights');
+    expect(store.device('42').name).toBe('Main lights');
+    const denied = component(`view:${second}:friend:device:remove-confirm:42`, 'friend');
+    emit(denied);
+    await vi.waitFor(() => expect(denied.editReply).toHaveBeenCalled());
+    expect(servers.store(second).devices()).toHaveLength(1);
+  });
+  it('asks for removal confirmation and supports self unlink after role revocation', async () => {
+    const remove = component(`view:${second}:owner:device:remove:42`);
+    emit(remove);
+    await vi.waitFor(() => expect(remove.editReply).toHaveBeenCalled());
+    expect(output(remove)).toContain('Confirm removal');
+    expect(servers.store(second).devices()).toHaveLength(1);
+    const confirm = component(`view:${second}:owner:device:remove-confirm:42`);
+    emit(confirm);
+    await vi.waitFor(() => expect(confirm.editReply).toHaveBeenCalled());
+    expect(servers.store(second).devices()).toHaveLength(0);
+    servers.link(second, 'friend', { playerId: secondPairing.playerId, playerToken: '456' });
+    role = [];
+    const unlink = component('pairui:unlink:friend:none:0', 'friend');
+    emit(unlink);
+    await vi.waitFor(() => expect(unlink.reply).toHaveBeenCalled());
+    expect(servers.identity(second, 'friend')).toBeDefined();
+    const revoke = component('pairui:unlink-confirm:friend:none:0', 'friend');
+    emit(revoke);
+    await vi.waitFor(() => expect(revoke.editReply).toHaveBeenCalled());
+    expect(servers.identity(second, 'friend')).toBeUndefined();
+  });
+});
 describe('one Discord client hosting multiple Rust servers', () => {
   it('gives friends a portable download and code instead of developer setup commands', async () => {
     config.PAIRING_HELPER_URL = 'https://example.org/RustPlus-Pairing-Windows-x64.zip';

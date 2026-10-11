@@ -97,6 +97,10 @@ export class Store {
     if (!parsed.success) throw new Error('Invalid device name.');
     this.db.prepare('UPDATE devices SET name=? WHERE id=?').run(parsed.data.name, id);
   }
+  markSensitive(id: string): void {
+    if (this.device(id).type !== 'switch') throw new Error('Select a Smart Switch.');
+    this.db.prepare('UPDATE devices SET sensitive=1 WHERE id=?').run(id);
+  }
   enable(id: string, enabled: boolean): void {
     if (this.device(id).type !== 'alarm') throw new Error('Select a Smart Alarm.');
     this.db.prepare('UPDATE devices SET enabled=? WHERE id=?').run(Number(enabled), id);

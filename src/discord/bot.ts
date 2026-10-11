@@ -15,6 +15,8 @@ import {
   type ChatInputCommandInteraction,
   type ButtonInteraction,
   type GuildMember,
+  type ModalSubmitInteraction,
+  type StringSelectMenuInteraction,
 } from 'discord.js';
 import type { Config } from '../config';
 import type { Store } from '../database';
@@ -30,8 +32,11 @@ import { Alerts, AlertDeliveryError } from './alerts';
 import { commands } from './commands';
 import { ConnectionNotifications } from '../connection-notifications';
 import type { ChatSender } from '../chat-identities';
+import { card } from './ui';
+import { Management, ManagementError } from './management';
 
 interface BotRuntime {
+  id?: string;
   client: Client;
   sender: ChatSender;
   label: string;
@@ -63,6 +68,7 @@ export class Bot {
   readonly panel: Panel;
   readonly chat: ChatBridge;
   readonly alerts: Alerts;
+  readonly management: Management;
   readonly connectionNotifications: ConnectionNotifications;
   private confirmations = new Map<string, Confirmation>();
   private stopping = false;
@@ -88,6 +94,18 @@ export class Bot {
     this.alerts = new Alerts(this.client, store, config);
     this.connectionNotifications = new ConnectionNotifications(rust, store, this.alerts);
     this.chat = new ChatBridge(this.client, rust, store, config, this.permissions, runtime?.sender);
+    this.management = new Management(
+      runtime?.id || 'default',
+      runtime?.label,
+      store,
+      rust,
+      this.devices,
+      this.chat,
+      this.alerts,
+      this.panel,
+      this.permissions,
+      () => this.connectionNotifications.lastSuccessfulAt ?? undefined,
+    );
     this.devices.on('alarm', (device) => this.alerts.enqueue(device));
     this.devices.on('alarmActive', (device) => {
       try {
@@ -145,6 +163,7 @@ export class Bot {
   }
   ownsButton(id: string, messageId: string): boolean {
     return (
+      this.management.owns(id) ||
       this.panel.isPanel(messageId) ||
       (id.startsWith('confirm:') && this.confirmations.has(id.split(':')[1]))
     );
@@ -153,7 +172,11 @@ export class Bot {
     if (!this.stopping) this.track(this.interaction(interaction), 'interaction');
   }
   private async principal(
-    interaction: ChatInputCommandInteraction | ButtonInteraction,
+    interaction:
+      | ChatInputCommandInteraction
+      | ButtonInteraction
+      | ModalSubmitInteraction
+      | StringSelectMenuInteraction,
   ): Promise<Principal> {
     if (interaction.guildId !== this.config.DISCORD_GUILD_ID)
       throw new Error('This bot is configured for a different guild.');
@@ -171,14 +194,32 @@ export class Bot {
     };
   }
   private embed(title: string, description: string): EmbedBuilder {
-    return new EmbedBuilder()
-      .setTitle(title)
-      .setDescription(description.slice(0, 4096))
-      .setColor(0xce6f3e);
+    return card(title, description, this.runtime?.label);
   }
   private async interaction(interaction: Interaction): Promise<void> {
-    if (!interaction.isChatInputCommand() && !interaction.isButton()) return;
+    if (
+      !interaction.isChatInputCommand() &&
+      !interaction.isButton() &&
+      !interaction.isModalSubmit?.() &&
+      !interaction.isStringSelectMenu?.()
+    )
+      return;
     try {
+      if (!interaction.isChatInputCommand() && this.management.owns(interaction.customId)) {
+        if (
+          interaction.guildId !== this.config.DISCORD_GUILD_ID ||
+          interaction.customId.split(':')[2] !== interaction.user.id
+        )
+          throw new UserError('Open your own slash command to use this private control.');
+        if (interaction.isModalSubmit() && !interaction.isFromMessage())
+          throw new UserError('Reopen /device list to rename this device.');
+        if (!(interaction.isButton() && interaction.customId.split(':')[4] === 'rename'))
+          await interaction.deferUpdate();
+        const principal = await this.principal(interaction);
+        await this.management.handle(interaction, principal);
+        return;
+      }
+      if (!interaction.isChatInputCommand() && !interaction.isButton()) return;
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       if (this.stopping) throw new Error('Bot is shutting down.');
       const principal = await this.principal(interaction);
@@ -191,13 +232,14 @@ export class Bot {
       const safe =
         error instanceof RustFailure ||
         error instanceof UserError ||
+        error instanceof ManagementError ||
         error instanceof AlertDeliveryError
           ? error.message
           : 'The request failed. Check configuration, channel permissions and logs, then retry.';
       log.warn(
         {
           code: errorCode(error),
-          operation: interaction.isButton() ? 'button' : interaction.commandName,
+          operation: interaction.isChatInputCommand() ? interaction.commandName : 'component',
         },
         'Discord operation failed',
       );
@@ -337,7 +379,9 @@ export class Bot {
     }
     if (name === 'device') {
       if (sub === 'list') {
-        await reply('Registered devices', this.deviceList(false, options.getInteger('page') ?? 1));
+        await interaction.editReply(
+          this.management.view('device', principal.id, (options.getInteger('page') ?? 1) - 1),
+        );
         return;
       }
       const id = options.getString('id', true);
@@ -396,7 +440,9 @@ export class Bot {
     }
     if (name === 'alarm') {
       if (sub === 'list') {
-        await reply('Smart Alarms', this.deviceList(true, options.getInteger('page') ?? 1));
+        await interaction.editReply(
+          this.management.view('alarm', principal.id, (options.getInteger('page') ?? 1) - 1),
+        );
         return;
       }
       const id = options.getString('id', true);
@@ -432,7 +478,7 @@ export class Bot {
       }
       if (sub === 'disable') this.store.set('chatEnabled', false);
       if (sub !== 'status') void this.chat.reset();
-      await reply('Team chat bridge', this.chat.status());
+      await interaction.editReply(this.management.view('chat', principal.id));
       return;
     }
     if (name === 'settings') {
@@ -465,10 +511,7 @@ export class Bot {
       return;
     }
     if (name === 'status') {
-      await reply(
-        'Rust+ bot status',
-        `**Connection:** ${this.rust.state}\n**Last successful connection:** ${this.connectionNotifications.lastSuccessfulAt ? `<t:${Math.floor(this.connectionNotifications.lastSuccessfulAt / 1000)}:F>` : 'Not yet connected'}\n**Monitoring:** ${this.rust.online ? (this.rust.unavailableDevices.length ? `Degraded — ${this.rust.unavailableDevices.length} required device(s) unavailable` : 'Operational') : 'Unavailable'}\n**Server:** ${this.rust.info ? escapeMarkdown(this.rust.info.name).slice(0, 200) : 'Unavailable'}\n**Players:** ${this.rust.info ? `${this.rust.info.players}/${this.rust.info.maxPlayers}` : 'Unavailable'}\n**Devices:** ${this.store.devices().length}\n**Chat:** ${this.chat.status()}`,
-      );
+      await interaction.editReply(this.management.view('status', principal.id));
       return;
     }
     if (name === 'ping') {
@@ -481,21 +524,6 @@ export class Bot {
     await reply(
       'Rust+ bot commands',
       '`/panel` — Create or refresh base controls (admin)\n`/device add|remove|rename|list|status` — Manage paired devices (admin)\n`/alarm list|enable|disable|test` — Smart Alarm notifications (admin)\n`/chat setup|enable|disable|status` — Team chat synchronization\n`/settings role-add|role-remove|roles|alerts` — Configure access and alerts (admin)\n`/server list|use|pause|resume` — Manage saved Rust servers\n`/pair start|import|inbox|accept|status|unlink` — Pair servers, devices and personal chat accounts\n`/status` — Connection, server and device information\n`/ping` — Latency\n`/help` — This guide\n\nUse the optional server argument to select a server. Switch buttons and Discord-to-Rust chat require an operator role or administrator access. Personal Rust+ linking is required for chat. Switch power does not indicate physical door position.',
-    );
-  }
-  private deviceList(alarmsOnly = false, page = 1): string {
-    const devices = this.store.devices().filter((d) => !alarmsOnly || d.type === 'alarm');
-    if (!devices.length) return 'No devices registered.';
-    const pages = Math.ceil(devices.length / 10);
-    page = Math.min(page, pages);
-    return (
-      devices
-        .slice((page - 1) * 10, page * 10)
-        .map(
-          (d) =>
-            `**${escapeMarkdown(d.name)}** • \`${d.id}\` • ${d.type}${d.type === 'alarm' ? ` • ${d.enabled ? 'enabled' : 'disabled'}` : ''}`,
-        )
-        .join('\n') + `\n\nPage ${page}/${pages} • Use the page option to see more.`
     );
   }
   async stop(updatePanel = false): Promise<void> {

@@ -1,14 +1,9 @@
-import {
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  Client,
-  EmbedBuilder,
-  escapeMarkdown,
-} from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, escapeMarkdown } from 'discord.js';
 import type { Devices } from '../devices';
 import type { Store } from '../database';
 import { log, errorCode } from '../log';
+import { card } from './ui';
+import { needsConfirmation } from '../domain';
 
 interface PanelReference {
   channelId: string;
@@ -55,11 +50,10 @@ export class Panel {
     const pages = Math.max(1, Math.ceil(switches.length / 4));
     page = Math.max(0, Math.min(page, pages - 1));
     const shown = switches.slice(page * 4, page * 4 + 4);
-    const embed = new EmbedBuilder()
-      .setTitle('🦀 RUST BASE CONTROL')
+    const embed = card('🦀 RUST BASE CONTROL')
       .setColor(this.devices.rust.online ? 0x42b883 : 0xe5a742)
       .setDescription(
-        `**Connection:** ${this.devices.rust.state}\n${switches.length ? 'Operate your paired Smart Switches below.' : 'Add your first switch with `/device add`.'}`,
+        `**${this.devices.rust.online ? '🟢' : '🟠'} Connection:** ${this.devices.rust.state} • **${switches.length} switches**\n${switches.length ? 'Choose a switch below. States update directly from Rust+.' : 'Pair a switch in-game and open `/pair inbox`, or use `/device add`.'}`,
       )
       .setFooter({
         text: `Page ${page + 1}/${pages} • ON/OFF describes switch power, not physical door position`,
@@ -71,7 +65,7 @@ export class Panel {
       const state = this.devices.states.get(device.id),
         busy = this.devices.busy.has(device.id);
       embed.addFields({
-        name: escapeMarkdown(device.name),
+        name: `${needsConfirmation(device) ? '⚠ ' : ''}${escapeMarkdown(device.name)}`,
         value: `Switch: **${!this.devices.rust.online ? 'DISCONNECTED' : state === undefined ? 'UNKNOWN' : state ? '🟢 ON' : '⚫ OFF'}**${busy ? ' • Updating…' : ''}`,
       });
       components.push(

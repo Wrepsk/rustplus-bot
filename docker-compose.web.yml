@@ -1,0 +1,9 @@
+# Optional: host-based HTTPS reverse proxy forwards to 127.0.0.1:3080.
+# docker compose -f docker-compose.yml -f docker-compose.web.yml up -d --build
+services:
+  rust-bot:
+    environment:
+      PAIRING_WEB_HOST: 0.0.0.0
+      PAIRING_WEB_PORT: 3080
+    ports:
+      - '127.0.0.1:3080:3080'
