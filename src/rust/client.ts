@@ -1,0 +1,70 @@
+import { createRequire } from 'node:module';
+import RustPlus from '@liamcottle/rustplus.js';
+import type { Config } from '../config';
+import { ProtocolDecodeFailure, type RustClient } from './protocol';
+
+// Use the library's own protobuf runtime so reflection objects remain compatible.
+const upstreamRequire = createRequire(require.resolve('@liamcottle/rustplus.js'));
+const protobuf = upstreamRequire('protobufjs') as typeof import('protobufjs');
+
+export function createRustClient(config: Config): RustClient {
+  const client = new RustPlus(
+    config.RUST_SERVER_IP,
+    config.RUST_APP_PORT,
+    config.RUST_STEAM_ID,
+    config.RUST_PLAYER_TOKEN,
+    config.RUST_USE_PROXY,
+  );
+  // Installed rustplus.js 2.5.0 assigns AppMessage before emitting connected.
+  // Run before the manager's listener, which starts authenticated requests.
+  client.on('connected', () => {
+    try {
+      const messageType = client.AppMessage;
+      const root = messageType.root;
+      // Upstream issues #76/#81 and PR #82: these default-valued fields can be absent.
+      // Keep all other schema requirements, request fields and entity type IDs intact.
+      for (const [typeName, fieldName] of [
+        ['rustplus.AppInfo', 'queuedPlayers'],
+        ['rustplus.AppTeamInfo.Note', 'type'],
+      ]) {
+        const type = root.lookupType(typeName);
+        const field = type.fields[fieldName];
+        if (!field) throw new ProtocolDecodeFailure();
+        if (!field.required) continue;
+        const replacement = protobuf.Field.fromJSON(field.name, {
+          ...field.toJSON(),
+          rule: 'optional',
+        });
+        type.remove(field).add(replacement);
+      }
+      root.resolveAll();
+      messageType.setup();
+      const decode = messageType.decode;
+      let failed = false;
+      messageType.decode = (reader, length) => {
+        if (failed) return messageType.create();
+        try {
+          return decode.call(messageType, reader, length);
+        } catch (error) {
+          // Upstream decodes inside an unguarded WebSocket callback. Its error event
+          // lets the manager cancel pending requests and reconnect without a process crash.
+          failed = true;
+          // Log only schema metadata, never packet contents or raw upstream errors.
+          let schemaField: string | undefined;
+          if (error instanceof protobuf.util.ProtocolError) {
+            const instance = error.instance as { $type?: import('protobufjs').Type } | undefined;
+            const type = instance?.$type;
+            const missing = /^missing required '([A-Za-z]\w*)'$/.exec(error.message);
+            if (type instanceof protobuf.Type && missing && type.fields[missing[1]])
+              schemaField = `${type.fullName.replace(/^\./, '')}.${missing[1]}`;
+          }
+          client.emit('error', new ProtocolDecodeFailure(schemaField));
+          return messageType.create();
+        }
+      };
+    } catch {
+      client.emit('error', new ProtocolDecodeFailure());
+    }
+  });
+  return client;
+}

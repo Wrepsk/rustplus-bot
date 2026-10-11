@@ -1,9 +1,9 @@
 import { EventEmitter } from 'node:events';
-import RustPlus from '@liamcottle/rustplus.js';
 import type { Config } from '../config';
 import type { Device } from '../domain';
-import { log, errorCode } from '../log';
+import { log, transportErrorDetails } from '../log';
 import type { RustClient, RustMessage, RustRequest, RustResponse } from './protocol';
+import { createRustClient } from './client';
 
 export type ConnectionState =
   'stopped' | 'connecting' | 'synchronizing' | 'connected' | 'reconnecting' | 'invalid-credentials';
@@ -46,20 +46,15 @@ export class Connection extends EventEmitter {
   private syncing = new Map<string, Promise<boolean>>();
   private sleepTimer?: NodeJS.Timeout;
   private wake?: () => void;
+  private readonly transport: 'proxy' | 'direct';
   constructor(
     config: Config,
     private devices: () => Device[],
-    private factory: () => RustClient = () =>
-      new RustPlus(
-        config.RUST_SERVER_IP,
-        config.RUST_APP_PORT,
-        config.RUST_STEAM_ID,
-        config.RUST_PLAYER_TOKEN,
-        config.RUST_USE_PROXY,
-      ),
+    private factory: () => RustClient = () => createRustClient(config),
     private paceMs = 800,
   ) {
     super();
+    this.transport = config.RUST_USE_PROXY ? 'proxy' : 'direct';
   }
   get online(): boolean {
     return this.state === 'connected';
@@ -123,7 +118,10 @@ export class Connection extends EventEmitter {
       if (current()) this.recover();
     });
     client.on('error', (error: unknown) => {
-      log.warn({ code: errorCode(error) }, 'Rust+ transport error');
+      log.warn(
+        { transport: this.transport, ...transportErrorDetails(error) },
+        'Rust+ transport error',
+      );
       if (current()) this.recover();
     });
     client.on('message', (message: RustMessage) => {

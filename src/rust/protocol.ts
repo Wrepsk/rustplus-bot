@@ -1,6 +1,13 @@
 import type { EventEmitter } from 'node:events';
 import type { TeamMessage } from '../domain';
 
+export class ProtocolDecodeFailure extends Error {
+  readonly code = 'RUST_PROTOCOL_DECODE';
+  constructor(readonly schemaField?: string) {
+    super('Rust+ message decoding failed.');
+  }
+}
+
 export interface RustResponse {
   seq: number;
   error?: { error: string };

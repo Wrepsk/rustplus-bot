@@ -11,6 +11,7 @@ declare module '@liamcottle/rustplus.js' {
     connect(): void;
     disconnect(): void;
     seq: number;
+    AppMessage: import('protobufjs').Type;
     seqCallbacks: ((message: import('./rust/protocol').RustMessage) => boolean)[];
     websocket?: { terminate(): void } | null;
     sendRequest(

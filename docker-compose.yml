@@ -1,7 +1,9 @@
 services:
   rust-bot:
     build: .
-    init: true
+    # Run Node directly; some VPS hosts deny execution of Docker's injected init helper.
+    # The bot handles SIGTERM/SIGINT itself and does not spawn child processes.
+    init: false
     restart: unless-stopped
     env_file: .env
     environment:
