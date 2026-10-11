@@ -39,6 +39,7 @@ import type { DeathPush } from '../pairing/schema';
 import { Cameras } from '../cameras/service';
 import { CameraWeb } from '../cameras/web';
 import { CameraError } from '../cameras/registry';
+import { CameraPanel } from './camera-panel';
 
 type HostComponent = ButtonInteraction | ModalSubmitInteraction | StringSelectMenuInteraction;
 
@@ -60,6 +61,7 @@ export class DiscordHost {
   readonly cameras: Cameras;
   private web?: PairingWeb;
   private sessions = new Map<string, ServerSession>();
+  private cameraPanels = new Map<string, CameraPanel>();
   private tasks = new Set<Promise<unknown>>();
   private lifecycle: Promise<unknown> = Promise.resolve();
   private stopping = false;
@@ -95,7 +97,10 @@ export class DiscordHost {
         (request, response) => cameraWeb.handle(request, response),
       );
     }
-    for (const profile of servers.list()) if (profile.enabled) this.create(profile.id);
+    for (const profile of servers.list()) {
+      this.cameraPanel(profile.id);
+      if (profile.enabled) this.create(profile.id);
+    }
     this.client.on(Events.InteractionCreate, (interaction) => {
       if (!this.stopping) this.track(this.interaction(interaction));
     });
@@ -113,6 +118,7 @@ export class DiscordHost {
       log.warn('Discord disconnected; gateway will reconnect'),
     );
     const resume = () => {
+      for (const panel of this.cameraPanels.values()) panel.schedule();
       for (const { bot } of this.sessions.values()) {
         bot.panel.schedule();
         bot.alerts.wake();
@@ -131,6 +137,8 @@ export class DiscordHost {
     const store = this.servers.store(id),
       config = this.servers.connectionConfig(id);
     const rust = new Connection(config, () => store.devices(), undefined, 800, id);
+    this.cameraPanel(id);
+    rust.on('status', () => this.cameraPanels.get(id)?.schedule());
     const identities = new ChatIdentities(this.servers, id, rust);
     const bot = new Bot(config, store, rust, {
       client: this.client,
@@ -142,6 +150,24 @@ export class DiscordHost {
     const session = { bot, rust, identities };
     this.sessions.set(id, session);
     return session;
+  }
+  private cameraPanel(id: string): CameraPanel {
+    let panel = this.cameraPanels.get(id);
+    if (!panel) {
+      panel = new CameraPanel(
+        this.client,
+        this.servers.store(id),
+        id,
+        () => this.cameras.registry(id).list(),
+        () => ({
+          name: this.servers.get(id).name,
+          state: this.sessions.get(id)?.rust.state || 'paused',
+          online: this.sessions.get(id)?.rust.online || false,
+        }),
+      );
+      this.cameraPanels.set(id, panel);
+    }
+    return panel;
   }
   private configureChatChannel(id: string, channel: string): Promise<void> {
     return this.serialize(async () => {
@@ -177,6 +203,7 @@ export class DiscordHost {
       await previous.bot.stop(true);
     }
     if (!this.stopping && this.servers.get(id).enabled) this.create(id).bot.startServices();
+    this.cameraPanels.get(id)?.schedule();
   }
   private serialize<T>(work: () => Promise<T>): Promise<T> {
     if (this.queued >= 50)
@@ -263,7 +290,7 @@ export class DiscordHost {
     if (name === 'camera') {
       const sub = input.options.getSubcommand();
       if (sub === 'share' && input.options.getBoolean('enabled') === false) return 'member';
-      return ['add', 'remove'].includes(sub) ? 'admin' : 'operator';
+      return ['add', 'remove', 'panel'].includes(sub) ? 'admin' : 'operator';
     }
     if (name === 'chat' && input.options.getSubcommand() !== 'status') return 'admin';
     if (name === 'server') return input.options.getSubcommand() === 'use' ? 'operator' : 'admin';
@@ -435,6 +462,7 @@ export class DiscordHost {
           throw new HostError(error instanceof Error ? error.message : 'Invalid server name.');
         }
         this.sessions.get(id)?.bot.setServerName(renamed.name);
+        this.cameraPanels.get(id)?.schedule();
         return renamed;
       });
       await response.editReply({
@@ -487,6 +515,50 @@ export class DiscordHost {
     });
   }
   private async interaction(interaction: Interaction): Promise<void> {
+    if (
+      (interaction.isStringSelectMenu?.() || interaction.isButton()) &&
+      interaction.customId.startsWith('campanel:')
+    ) {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      try {
+        const [, server, action] = interaction.customId.split(':');
+        const principal = await this.principal(interaction);
+        this.permissions(server, principal);
+        const panel = this.cameraPanel(server);
+        if (!panel.isPanel(interaction.message.id, interaction.channelId))
+          throw new CameraError(
+            'This camera panel is inactive. Use the current panel or /camera panel.',
+          );
+        if (
+          action === 'watch' &&
+          interaction.isStringSelectMenu() &&
+          interaction.values.length === 1
+        ) {
+          await this.cameraLink(interaction, server, principal.id, interaction.values[0]);
+        } else if (action === 'refresh' && interaction.isButton()) {
+          await panel.refresh();
+          await interaction.editReply({
+            content: 'Camera panel refreshed.',
+            allowedMentions: { parse: [] },
+          });
+        } else if (action === 'stop' && interaction.isButton()) {
+          this.cameras.stopFor(server, principal.id, false);
+          await interaction.editReply({
+            content: 'Your viewer and sessions borrowing your account were stopped.',
+            allowedMentions: { parse: [] },
+          });
+        } else throw new CameraError('Choose a camera or button from the current panel.');
+      } catch (error) {
+        await interaction.editReply({
+          content:
+            error instanceof CameraError || error instanceof UserError
+              ? error.message
+              : 'Camera request failed. Check permissions and try again.',
+          allowedMentions: { parse: [] },
+        });
+      }
+      return;
+    }
     if (interaction.isStringSelectMenu?.() && interaction.customId.startsWith('camera-watch:')) {
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       try {
@@ -734,17 +806,24 @@ export class DiscordHost {
       return;
     }
     let description: string;
-    if (sub === 'add') {
+    if (sub === 'panel') {
+      if (!input.channelId) throw new CameraError('Run /camera panel in a guild text channel.');
+      await this.cameraPanel(server).create(input.channelId);
+      description =
+        'Camera panel created or refreshed in this channel. Select a camera there to receive your private viewer link.';
+    } else if (sub === 'add') {
       registry.add({
         id: input.options.getString('id', true),
         name: input.options.getString('name', true),
       });
       description =
         'Camera registered. Use /camera watch to view it. Camera identifiers are configured in-game; Smart Device pairing/entity IDs are separate.';
+      this.cameraPanel(server).schedule();
     } else if (sub === 'remove') {
       registry.remove(input.options.getString('id', true));
       this.cameras.pause(server);
       description = 'Camera removed. Any viewer on this server was closed.';
+      this.cameraPanel(server).schedule();
     } else if (sub === 'share') {
       const enabled = input.options.getBoolean('enabled', true);
       this.cameras.share(server, principal.id, enabled);
@@ -1040,6 +1119,7 @@ export class DiscordHost {
   }
   async stop(): Promise<void> {
     this.stopping = true;
+    for (const panel of this.cameraPanels.values()) panel.stop();
     this.pendingCommands.clear();
     this.cameras.stop();
     await this.web?.stop();
@@ -1047,6 +1127,8 @@ export class DiscordHost {
     for (const { identities } of this.sessions.values()) identities.stop();
     const stops = [...this.sessions.values()].map(({ bot }) => bot.stop());
     await Promise.allSettled([this.lifecycle, ...this.tasks, ...stops]);
+    await Promise.all([...this.cameraPanels.values()].map((panel) => panel.drain()));
+    this.cameraPanels.clear();
     this.sessions.clear();
     await this.client.destroy();
   }

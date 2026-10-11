@@ -242,7 +242,14 @@ describe('camera session authorization and lifecycle', () => {
     expect(motionCalls.mock.calls.map(([active]) => active)).toEqual([true, false]);
     cameras.hold(id, ['left'], 4);
     await vi.advanceTimersByTimeAsync(1500);
-    expect(inputs()).toEqual([18, 0, 8, 0]);
+    expect(inputs().slice(2, -1).length).toBeGreaterThan(1);
+    expect(inputs().slice(2, -1).length).toBeLessThanOrEqual(10);
+    expect(
+      inputs()
+        .slice(2, -1)
+        .every((buttons) => buttons === 8),
+    ).toBe(true);
+    expect(inputs().at(-1)).toBe(0);
     expect(cameras.status(id).fresh).toBe(true);
   });
   it('samples the newest keys at dispatch and closes a stalled held input without retry', async () => {
@@ -265,6 +272,25 @@ describe('camera session authorization and lifecycle', () => {
     expect(connections[0].request.mock.calls.some(([r]) => r.cameraInput?.buttons === 2)).toBe(
       false,
     );
+  });
+  it('streams smaller held look steps at a bounded ten Hz and promptly releases on key-up', async () => {
+    const id = await open();
+    frame();
+    for (let i = 0; i < 4; i++) {
+      cameras.hold(id, ['look-right'], i + 1);
+      await vi.advanceTimersByTimeAsync(250);
+    }
+    const inputs = () =>
+      connections[0].request.mock.calls.flatMap(([r]) => (r.cameraInput ? [r.cameraInput] : []));
+    expect(inputs().length).toBeGreaterThanOrEqual(8);
+    expect(inputs().length).toBeLessThanOrEqual(10);
+    expect(inputs().every((input) => input.mouseDelta.x === 1 && input.buttons === 0)).toBe(true);
+    cameras.hold(id, [], 5);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(inputs().at(-1)?.mouseDelta).toEqual({ x: 0, y: 0 });
+    const count = inputs().length;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(inputs()).toHaveLength(count);
   });
   it('stream callbacks cannot interrupt cleanup and only one stream can attach', async () => {
     const id = await open();

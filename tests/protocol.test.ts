@@ -22,6 +22,11 @@ const protobuf = upstreamRequire('protobufjs') as typeof import('protobufjs');
 describe('installed rustplus.js protocol compatibility', () => {
   it('subscribes to cameras, decodes default-valued rays and sends movement using the installed schema', async () => {
     const root = await protobuf.load(join(dirname(libraryPath), 'rustplus.proto'));
+    // Simulate the documented newer server schema independently of our client patch.
+    const cameraType = root.lookupType('rustplus.AppCameraRays');
+    cameraType.add(new protobuf.Field('cameraPosition', 7, 'Vector3', 'optional'));
+    cameraType.add(new protobuf.Field('cameraRotation', 8, 'Vector3', 'optional'));
+    cameraType.add(new protobuf.Field('sampleRotation', 9, 'Vector3', 'optional'));
     for (const name of [
       'rustplus.AppInfo',
       'rustplus.AppCameraInfo',
@@ -95,7 +100,34 @@ describe('installed rustplus.js protocol compatibility', () => {
           )
           .finish(),
       );
-      expect((await rays)[0].sampleOffset).toBe(0);
+      const initialRays = (await rays)[0];
+      expect(initialRays.sampleOffset).toBe(0);
+      expect(initialRays.cameraPosition).toBeNull();
+      const posed = once(connection, 'cameraRays');
+      peer!.send(
+        messageType
+          .encode(
+            messageType.fromObject({
+              broadcast: {
+                cameraRays: {
+                  sampleOffset: 2,
+                  rayData: Buffer.from([0, 0]),
+                  verticalFov: 65,
+                  distance: 100,
+                  cameraPosition: { x: 1 },
+                  cameraRotation: { y: 90 },
+                  sampleRotation: { y: 91 },
+                },
+              },
+            }),
+          )
+          .finish(),
+      );
+      const received = (await posed)[0];
+      expect(received.cameraPosition.x).toBe(1);
+      expect(received.cameraPosition.y).toBe(0);
+      expect(received.cameraRotation.y).toBe(90);
+      expect(received.sampleRotation.y).toBe(91);
       expect(
         (await connection.request({ cameraInput: { buttons: 2, mouseDelta: { x: 0, y: 0 } } }))
           .success,

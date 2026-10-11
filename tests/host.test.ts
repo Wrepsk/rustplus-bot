@@ -12,6 +12,7 @@ import { PairingListener } from '../src/pairing/listener';
 import { encryptPairing } from '../src/pairing/crypto';
 import { PlayerActivity } from '../src/activity';
 import { Panel } from '../src/discord/panel';
+import { CameraPanel } from '../src/discord/camera-panel';
 import { Alerts, AlertDeliveryError } from '../src/discord/alerts';
 import { commands } from '../src/discord/commands';
 import type { Bot } from '../src/discord/bot';
@@ -150,6 +151,71 @@ function component(
   return interaction;
 }
 describe('camera Discord access', () => {
+  it('creates per-server camera panels in the same channel through the server picker; only admins may create them', async () => {
+    const create = vi.spyOn(CameraPanel.prototype, 'create').mockResolvedValue();
+    const denied = command('camera', 'panel', { server: second }, 'friend');
+    emit(denied);
+    await vi.waitFor(() => expect(output(denied)).toContain('Administrator'));
+    expect(create).not.toHaveBeenCalled();
+    const request = command('camera', 'panel');
+    emit(request);
+    await vi.waitFor(() => expect(output(request)).toContain('command-server:'));
+    const pick = component(
+      output(request).match(/command-server:[a-f0-9]+/)![0],
+      'owner',
+      'select',
+      { selected: second },
+    );
+    emit(pick);
+    await vi.waitFor(() => expect(output(pick)).toContain('Camera panel created'));
+    const first = command('camera', 'panel', { server: 'default' });
+    emit(first);
+    await vi.waitFor(() => expect(output(first)).toContain('Camera panel created'));
+    expect(create.mock.calls).toEqual([['general'], ['general']]);
+    expect(create.mock.contexts[0]).not.toBe(create.mock.contexts[1]);
+  });
+  it('routes persistent camera selections to the exact server with fresh roles and a private response', async () => {
+    config.PAIRING_WEB_URL = 'https://pair.example.org';
+    servers
+      .store(second)
+      .set('cameraPanel', { channelId: 'general', messageId: 'private-message' });
+    host.cameras.registry(second).add({ id: 'ROOF', name: 'Roof' });
+    const issue = vi.spyOn(host.cameras, 'issue').mockReturnValue('a'.repeat(64));
+    role = [];
+    const denied = component(`campanel:${second}:watch`, 'friend', 'select', { selected: 'ROOF' });
+    emit(denied);
+    await vi.waitFor(() => expect(output(denied)).toContain('operator role'));
+    role = ['operator'];
+    const forged = component('campanel:default:watch', 'friend', 'select', { selected: 'ROOF' });
+    emit(forged);
+    await vi.waitFor(() => expect(output(forged)).toContain('inactive'));
+    const stale = component(`campanel:${second}:watch`, 'friend', 'select', { selected: 'ROOF' });
+    stale.message.id = 'old';
+    emit(stale);
+    await vi.waitFor(() => expect(output(stale)).toContain('inactive'));
+    const allowed = component(`campanel:${second}:watch`, 'friend', 'select', { selected: 'ROOF' });
+    emit(allowed);
+    await vi.waitFor(() => expect(output(allowed)).toContain('/camera#ticket='));
+    expect(issue).toHaveBeenCalledExactlyOnceWith(second, 'friend', 'ROOF');
+    expect(allowed.deferReply).toHaveBeenCalledWith({ flags: 64 });
+    expect(allowed.deferUpdate).not.toHaveBeenCalled();
+  });
+  it('prevents unregistered selection and makes Stop my viewer scoped even for administrators', async () => {
+    config.PAIRING_WEB_URL = 'https://pair.example.org';
+    servers
+      .store(second)
+      .set('cameraPanel', { channelId: 'general', messageId: 'private-message' });
+    const unknown = component(`campanel:${second}:watch`, 'friend', 'select', {
+      selected: 'unregistered',
+    });
+    emit(unknown);
+    await vi.waitFor(() => expect(output(unknown)).toContain('registered camera'));
+    const stop = vi.spyOn(host.cameras, 'stopFor');
+    const pressed = component(`campanel:${second}:stop`);
+    emit(pressed);
+    await vi.waitFor(() => expect(output(pressed)).toContain('were stopped'));
+    expect(stop).toHaveBeenCalledExactlyOnceWith(second, 'owner', false);
+  });
   it('requires administrator registration and preserves options through the server picker', async () => {
     const denied = command('camera', 'add', { server: second, id: 'ROOF', name: 'Roof' }, 'friend');
     emit(denied);

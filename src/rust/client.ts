@@ -21,6 +21,16 @@ export function createRustClient(config: Config): RustClient {
     try {
       const messageType = client.AppMessage;
       const root = messageType.root;
+      // Optional camera pose fields from RustPlusApi's current companion contracts.
+      // Keep upstream transport/requests intact; old servers may omit these entirely.
+      const cameraRays = root.lookupType('rustplus.AppCameraRays');
+      for (const [name, id] of [
+        ['cameraPosition', 7],
+        ['cameraRotation', 8],
+        ['sampleRotation', 9],
+      ] as const)
+        if (!cameraRays.fields[name] && !cameraRays.fieldsById[id])
+          cameraRays.add(new protobuf.Field(name, id, 'Vector3', 'optional'));
       // Rust omits default-valued metadata (upstream PR #77 / issues #76 and #81).
       // Apply defaults to the data our bot consumes, retaining identity/text fields,
       // response correlation, request requirements, entity types and payload presence.

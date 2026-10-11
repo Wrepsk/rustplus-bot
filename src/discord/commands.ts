@@ -7,6 +7,13 @@ export const commands = [
     .setDescription('View registered Rust+ cameras and control movement')
     .addSubcommand((s) =>
       s
+        .setName('panel')
+        .setDescription(
+          'Create or refresh this server’s camera panel in this channel (administrator)',
+        ),
+    )
+    .addSubcommand((s) =>
+      s
         .setName('add')
         .setDescription('Register a CCTV, PTZ, drone or turret camera (administrator)')
         .addStringOption((o) =>

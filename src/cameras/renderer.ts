@@ -18,7 +18,7 @@ parentPort.on('message', async ({frames, motion}) => {
     for (const frame of frames) image.add(frame, frame.at);
     const bitmap = image.render(Date.now());
     const png = await new Jimp({data:Buffer.from(bitmap.data), width:bitmap.width, height:bitmap.height}).deflateLevel(1).getBufferAsync(Jimp.MIME_PNG);
-    parentPort.postMessage({png});
+    parentPort.postMessage({png, mode:bitmap.mode});
   } catch { parentPort.postMessage({error:true}); }
 });`;
 export class CameraRenderer {
@@ -33,7 +33,7 @@ export class CameraRenderer {
   private stopped = false;
   constructor(
     info: CameraInfo,
-    private output: (png: Buffer) => void,
+    private output: (png: Buffer, mode?: 'pose' | 'spatial') => void,
     private failed: () => void,
   ) {
     if (
@@ -54,17 +54,20 @@ export class CameraRenderer {
       },
       resourceLimits: { maxOldGenerationSizeMb: 96 },
     });
-    this.worker.on('message', (result: { png?: Uint8Array; error?: boolean }) => {
-      if (this.timer) clearTimeout(this.timer);
-      this.busy = false;
-      if (this.stopped) return;
-      if (!result.png || result.png.byteLength > 2097152) {
-        this.fail();
-        return;
-      }
-      this.output(Buffer.from(result.png));
-      this.schedule();
-    });
+    this.worker.on(
+      'message',
+      (result: { png?: Uint8Array; error?: boolean; mode?: 'pose' | 'spatial' }) => {
+        if (this.timer) clearTimeout(this.timer);
+        this.busy = false;
+        if (this.stopped) return;
+        if (!result.png || result.png.byteLength > 2097152) {
+          this.fail();
+          return;
+        }
+        this.output(Buffer.from(result.png), result.mode);
+        this.schedule();
+      },
+    );
     this.worker.on('error', () => this.fail());
     this.worker.on('exit', () => {
       if (!this.stopped) this.fail();
@@ -82,7 +85,30 @@ export class CameraRenderer {
       this.fail();
       return;
     }
-    this.frames.push({ sampleOffset: frame.sampleOffset, rayData: frame.rayData, at: Date.now() });
+    this.frames.push({
+      sampleOffset: frame.sampleOffset,
+      rayData: frame.rayData,
+      verticalFov: frame.verticalFov,
+      distance: frame.distance,
+      // Protobuf puts omitted zero vector components on the prototype. Materialize
+      // them before structured cloning, which preserves only own properties.
+      cameraPosition: frame.cameraPosition && {
+        x: frame.cameraPosition.x,
+        y: frame.cameraPosition.y,
+        z: frame.cameraPosition.z,
+      },
+      cameraRotation: frame.cameraRotation && {
+        x: frame.cameraRotation.x,
+        y: frame.cameraRotation.y,
+        z: frame.cameraRotation.z,
+      },
+      sampleRotation: frame.sampleRotation && {
+        x: frame.sampleRotation.x,
+        y: frame.sampleRotation.y,
+        z: frame.sampleRotation.z,
+      },
+      at: Date.now(),
+    });
     this.pendingBytes += frame.rayData.byteLength;
     // Queue only undecoded packets. The worker retains a fixed per-pixel cache,
     // rather than throwing away image coverage each time ten packets roll over.
@@ -96,7 +122,7 @@ export class CameraRenderer {
   }
   private schedule(): void {
     if (this.stopped || this.busy || this.scheduled || !this.dirty) return;
-    const wait = Math.max(0, this.lastRender + 100 - Date.now());
+    const wait = Math.max(0, this.lastRender + 50 - Date.now());
     if (wait) {
       this.scheduled = setTimeout(() => {
         this.scheduled = undefined;

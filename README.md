@@ -123,7 +123,7 @@ Administrators can rename a saved server with `/server rename name:Trio Vanilla`
 
 ### Cameras and manual movement
 
-`/camera add|remove|list|watch|share|stop` adds a private camera viewer to the existing HTTPS website, with server/camera dropdowns, streamed frames, FPS diagnostics, capability-gated WASD/arrow controls and opt-in lending of offline teammates' accounts. Space/Shift move drones vertically; key release or window blur releases held movement. No additional DNS or ports are required. See [CAMERAS.md](CAMERAS.md) for setup, limits, security and VPS update steps. Camera identifiers are separate from Smart Device entity IDs. Live camera access, actual FPS and physical movement require an in-game smoke test.
+`/camera panel|add|remove|list|watch|share|stop` adds a private camera viewer to the existing HTTPS website, with server/camera dropdowns, streamed frames, FPS diagnostics, capability-gated WASD/arrow controls and opt-in lending of offline teammates' accounts. `/camera panel` creates a persistent camera panel per Rust server; multiple servers' panels can share a Discord channel and selections return private viewer links. Motion reconstruction uses optional camera pose/sampling metadata, with a compatible fallback for older servers. Space/Shift move drones vertically; key release or window blur releases held movement. No additional DNS or ports are required. See [CAMERAS.md](CAMERAS.md) for setup, limits, security and VPS update steps. Camera identifiers are separate from Smart Device entity IDs. Live camera access, actual FPS and physical movement require an in-game smoke test.
 
 ### Player online/offline and death notices
 

@@ -22,6 +22,7 @@ interface Session extends Ticket {
   info?: CameraInfo;
   png?: Buffer;
   frameAt: number;
+  rendering?: 'pose' | 'spatial';
   opened: number;
   seen: number;
   verified: number;
@@ -59,7 +60,7 @@ export class Cameras {
     private monitor: (server: string) => Connection | undefined,
     private authorize: (server: string, user: string) => Promise<void>,
     private factory: (config: Config, server: string) => Connection = (config, server) =>
-      new Connection(config, () => [], undefined, 500, server),
+      new Connection(config, () => [], undefined, 100, server),
   ) {}
   start(): void {
     this.timer ??= setInterval(() => this.tick(), 100);
@@ -256,13 +257,14 @@ export class Cameras {
       s.subscribed = Date.now();
       s.renderer = new CameraRenderer(
         info,
-        (png) => {
+        (png, mode) => {
           if (!s.reason) {
             s.png = png;
             s.frameAt = Date.now();
+            s.rendering = mode;
             s.sequence++;
             s.renders.push(s.frameAt);
-            s.renders = s.renders.filter((at) => at > Date.now() - 5000).slice(-100);
+            s.renders = s.renders.filter((at) => at > Date.now() - 5000).slice(-200);
             try {
               s.stream?.(png);
             } catch {
@@ -339,6 +341,7 @@ export class Cameras {
       rayAge: s.lastRayAt ? Date.now() - s.lastRayAt : null,
       rayFps: s.rays.filter((at) => at > Date.now() - 5000).length / 5,
       renderFps: s.renders.filter((at) => at > Date.now() - 5000).length / 5,
+      rendering: s.rendering || 'spatial',
     };
   }
   subscribe(id: string, listener: (png?: Buffer) => void): () => void {
@@ -360,7 +363,7 @@ export class Cameras {
     s.held = { actions: [...actions], sequence, until: Date.now() + 1000 };
   }
   private pump(id: string, s: Session): void {
-    if (!s.held || s.controlling || !s.rust || !s.info || Date.now() - s.inputAt < 500) return;
+    if (!s.held || s.controlling || !s.rust || !s.info || Date.now() - s.inputAt < 100) return;
     if (s.held.until <= Date.now()) s.held.actions = [];
     if (!s.held.actions.length && !s.inputNonzero) return;
     s.controlling = true;
@@ -378,6 +381,10 @@ export class Cameras {
             ? s.held.actions
             : [];
         request.cameraInput = heldMovement(actions, s.info!.controlFlags);
+        // Ten small manual look increments per second, preserving the old angular speed.
+        // Camera movement costs 0.01 tokens in the documented default Rust+ limits.
+        request.cameraInput.mouseDelta.x *= 0.2;
+        request.cameraInput.mouseDelta.y *= 0.2;
         s.inputAt = Date.now();
         s.inputNonzero = !!(
           request.cameraInput.buttons ||

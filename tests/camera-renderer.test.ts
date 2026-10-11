@@ -71,3 +71,32 @@ it('rejects excessive dimensions before creating a worker', () => {
       ),
   ).toThrow('dimensions');
 });
+it('retains prototype-default zero pose components across worker cloning and uses native motion detail', async () => {
+  let renderer: CameraRenderer | undefined;
+  try {
+    const result = await new Promise<{ png: Buffer; mode?: string }>((resolve, reject) => {
+      renderer = new CameraRenderer(
+        { width: 8, height: 8, controlFlags: 2, nearPlane: 0, farPlane: 100 },
+        (png, mode) => resolve({ png, mode }),
+        () => reject(new Error('Render failed.')),
+      );
+      renderer.motion(true);
+      renderer.push({
+        sampleOffset: 0,
+        rayData: Buffer.from([255, 128, 63, 3]),
+        verticalFov: 65,
+        distance: 100,
+        cameraPosition: Object.create({ x: 0, y: 0, z: 0 }) as { x: number; y: number; z: number },
+        cameraRotation: Object.assign(
+          Object.create({ x: 0, y: 0, z: 0 }) as { x: number; y: number; z: number },
+          { y: 10 },
+        ),
+        sampleRotation: { x: 0, y: 10, z: 0 },
+      });
+    });
+    expect(result.mode).toBe('pose');
+    expect(result.png.readUInt32BE(16)).toBe(8);
+  } finally {
+    renderer?.stop();
+  }
+});

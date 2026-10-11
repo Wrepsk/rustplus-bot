@@ -58,6 +58,11 @@ export interface CameraInfo {
 export interface CameraRays {
   sampleOffset: number;
   rayData: Uint8Array;
+  verticalFov?: number;
+  distance?: number;
+  cameraPosition?: { x: number; y: number; z: number };
+  cameraRotation?: { x: number; y: number; z: number };
+  sampleRotation?: { x: number; y: number; z: number };
 }
 export interface RustClient extends EventEmitter {
   connect(): void;
