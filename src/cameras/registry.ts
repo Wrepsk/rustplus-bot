@@ -61,7 +61,7 @@ export function movement(
     back: 4,
     left: 8,
     right: 16,
-    up: 32,
+    up: 128,
     down: 64,
   };
   const look: Record<string, [number, number]> = {
@@ -70,10 +70,28 @@ export function movement(
     'look-up': [0, -5],
     'look-down': [0, 5],
   };
-  if (Object.hasOwn(flight, action) && flags & 1 && (action !== 'down' || flags & 4))
+  if (Object.hasOwn(flight, action) && flags & 1 && (!['up', 'down'].includes(action) || flags & 4))
     input.buttons = flight[action];
   else if (Object.hasOwn(look, action) && flags & 2)
     [input.mouseDelta.x, input.mouseDelta.y] = look[action];
   else throw new CameraError('This movement is unavailable for this camera.');
   return input;
+}
+
+export function heldMovement(actions: string[], flags: number): ReturnType<typeof movement> {
+  if (actions.length > 8 || new Set(actions).size !== actions.length)
+    throw new CameraError('Invalid held controls.');
+  const result = movement('release', flags);
+  for (const action of actions) {
+    if (action === 'release') throw new CameraError('Use an empty held control list to release.');
+    const input = movement(action, flags);
+    result.buttons |= input.buttons;
+    result.mouseDelta.x += input.mouseDelta.x;
+    result.mouseDelta.y += input.mouseDelta.y;
+  }
+  // Opposite inputs cancel rather than producing contradictory movement.
+  if ((result.buttons & 6) === 6) result.buttons &= ~6;
+  if ((result.buttons & 24) === 24) result.buttons &= ~24;
+  if ((result.buttons & 192) === 192) result.buttons &= ~192;
+  return result;
 }

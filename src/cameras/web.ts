@@ -7,6 +7,12 @@ import { cameraPage, cameraScript, cameraStyles } from './page';
 
 const openSchema = z.object({ ticket: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 const inputSchema = z.object({ action: z.string().max(20) }).strict();
+const holdSchema = z
+  .object({
+    actions: z.array(z.string().max(20)).max(8),
+    sequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
 export class CameraWeb {
   constructor(
     private origin: string,
@@ -18,7 +24,7 @@ export class CameraWeb {
     const path = request.url || '';
     if (!path.startsWith('/camera')) return false;
     const send = (status: number, data: unknown) => {
-      if (!response.destroyed) {
+      if (!response.destroyed && !response.headersSent) {
         response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
         response.end(JSON.stringify(data));
       }
@@ -81,7 +87,7 @@ export class CameraWeb {
         send(200, { slot });
         return true;
       }
-      const route = /^\/camera\/api\/[a-f0-9]{24}\/(status|frame|input|stop)$/.exec(path);
+      const route = /^\/camera\/api\/[a-f0-9]{24}\/(status|frame|stream|input|stop)$/.exec(path);
       if (!route) {
         send(404, { error: 'Page not found.' });
         return true;
@@ -92,11 +98,65 @@ export class CameraWeb {
       if (!id) throw new CameraError('Viewer expired. Run /camera watch again.');
       const action = route[1];
       if (request.method === 'GET' && action === 'status') send(200, this.cameras.status(id));
-      else if (request.method === 'GET' && action === 'frame') {
+      else if (request.method === 'GET' && action === 'stream') {
+        const initial = this.cameras.status(id);
+        const png = this.cameras.frame(id);
+        let blocked = 0;
+        const write = (event: string, value: unknown) => {
+          if (blocked || response.destroyed) return;
+          try {
+            if (!response.write(`event: ${event}\ndata: ${JSON.stringify(value)}\n\n`))
+              blocked = Date.now();
+          } catch {
+            response.destroy();
+          }
+        };
+        const unsubscribe = this.cameras.subscribe(id, (png) => {
+          if (!png) {
+            response.end();
+            return;
+          }
+          write('frame', { image: png.toString('base64'), at: Date.now() });
+        });
+        response.writeHead(200, {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'X-Accel-Buffering': 'no',
+        });
+        response.flushHeaders();
+        response.on('drain', () => {
+          blocked = 0;
+        });
+        response.on('error', () => response.destroy());
+        write('status', initial);
+        if (png) write('frame', { image: png.toString('base64'), at: initial.frameAt });
+        const timer = setInterval(() => {
+          if (blocked && Date.now() - blocked > 5000) {
+            response.destroy();
+            return;
+          }
+          try {
+            write('status', this.cameras.status(id));
+          } catch {
+            response.end();
+          }
+        }, 1000);
+        response.on('close', () => {
+          clearInterval(timer);
+          unsubscribe();
+          this.cameras.close(id, 'Camera stream disconnected. Open a fresh viewer.');
+        });
+      } else if (request.method === 'GET' && action === 'frame') {
         const png = this.cameras.frame(id);
         response.writeHead(png ? 200 : 204, { 'Content-Type': 'image/png' });
         response.end(png);
       } else if (request.method === 'POST' && action === 'input') {
+        const held = holdSchema.safeParse(body);
+        if (held.success) {
+          this.cameras.hold(id, held.data.actions, held.data.sequence);
+          send(200, { accepted: true }); // Accepted latest state; never claim physical movement succeeded.
+          return true;
+        }
         const parsed = inputSchema.safeParse(body);
         if (!parsed.success) throw new CameraError('Invalid camera control.');
         await this.cameras.input(id, parsed.data.action);

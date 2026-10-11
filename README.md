@@ -123,7 +123,7 @@ Administrators can rename a saved server with `/server rename name:Trio Vanilla`
 
 ### Cameras and manual movement
 
-`/camera add|remove|list|watch|share|stop` adds a private camera viewer to the existing HTTPS website, with server/camera dropdowns, capability-gated look/drone controls and opt-in lending of offline teammates' accounts. No additional DNS or ports are required. See [CAMERAS.md](CAMERAS.md) for setup, limits, security and VPS update steps. Camera identifiers are separate from Smart Device entity IDs. Live camera access and physical movement require an in-game smoke test.
+`/camera add|remove|list|watch|share|stop` adds a private camera viewer to the existing HTTPS website, with server/camera dropdowns, streamed frames, FPS diagnostics, capability-gated WASD/arrow controls and opt-in lending of offline teammates' accounts. Space/Shift move drones vertically; key release or window blur releases held movement. No additional DNS or ports are required. See [CAMERAS.md](CAMERAS.md) for setup, limits, security and VPS update steps. Camera identifiers are separate from Smart Device entity IDs. Live camera access, actual FPS and physical movement require an in-game smoke test.
 
 ### Player online/offline and death notices
 

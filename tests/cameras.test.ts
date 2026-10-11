@@ -9,7 +9,7 @@ import type { Config } from '../src/config';
 import type { Connection } from '../src/rust/connection';
 import type { RustRequest, RustResponse } from '../src/rust/protocol';
 import { Cameras, offlineMember } from '../src/cameras/service';
-import { CameraRegistry, movement } from '../src/cameras/registry';
+import { CameraRegistry, movement, heldMovement } from '../src/cameras/registry';
 
 vi.mock('../src/cameras/renderer', () => ({
   CameraRenderer: class {
@@ -129,8 +129,17 @@ describe('camera registrations and controls', () => {
     expect(() => movement('look-left', 1)).toThrow();
     expect(() => movement('down', 1)).toThrow();
     expect(movement('look-left', 2).mouseDelta).toEqual({ x: -5, y: 0 });
-    expect(movement('up', 1).buttons).toBe(32);
+    expect(() => movement('up', 1)).toThrow();
+    expect(movement('up', 7).buttons).toBe(128);
     expect(movement('release', 0).buttons).toBe(0);
+  });
+  it('combines held keys, cancels opposites and rejects unsupported or dangerous inputs', () => {
+    expect(heldMovement(['forward', 'right', 'up'], 7).buttons).toBe(146);
+    expect(heldMovement(['forward', 'back', 'left', 'right', 'up', 'down'], 7).buttons).toBe(0);
+    expect(heldMovement(['look-left', 'look-right'], 2).mouseDelta.x).toBe(0);
+    expect(heldMovement([], 0).buttons).toBe(0);
+    for (const actions of [['fire'], ['release'], ['up'], ['forward', 'forward']])
+      expect(() => heldMovement(actions, 1)).toThrow();
   });
   it('rejects unknown or dead presence', () => {
     expect(offlineMember(team, steam)).toBe(true);
@@ -209,6 +218,65 @@ describe('camera session authorization and lifecycle', () => {
     expect(() => cameras.status(id)).toThrow('not retried');
     const moves = connections[0].request.mock.calls.filter(([r]) => r.cameraInput?.buttons === 2);
     expect(moves).toHaveLength(1);
+  });
+  it('coalesces held input, ignores old sequences and releases within the dead-man deadline', async () => {
+    const id = await open();
+    frame();
+    cameras.hold(id, ['forward'], 1);
+    cameras.hold(id, ['forward', 'right'], 2);
+    await vi.advanceTimersByTimeAsync(100);
+    cameras.hold(id, [], 3);
+    cameras.hold(id, ['back'], 2);
+    await vi.advanceTimersByTimeAsync(500);
+    const inputs = () =>
+      connections[0].request.mock.calls.flatMap(([r]) =>
+        r.cameraInput ? [r.cameraInput.buttons] : [],
+      );
+    expect(inputs()).toEqual([18, 0]);
+    cameras.hold(id, ['left'], 4);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(inputs()).toEqual([18, 0, 8, 0]);
+    expect(cameras.status(id).fresh).toBe(true);
+  });
+  it('samples the newest keys at dispatch and closes a stalled held input without retry', async () => {
+    const id = await open();
+    frame();
+    let dispatch: (() => void) | undefined;
+    connections[0].request.mockImplementationOnce(async (_request, _internal, before) => {
+      dispatch = before;
+      return new Promise(() => {});
+    });
+    cameras.hold(id, ['forward'], 1);
+    await vi.advanceTimersByTimeAsync(100);
+    cameras.hold(id, [], 2);
+    dispatch?.();
+    const held = connections[0].request.mock.calls.find(([r]) => r.cameraInput)?.[0];
+    expect(held?.cameraInput?.buttons).toBe(0);
+    await vi.advanceTimersByTimeAsync(2100);
+    expect(() => cameras.status(id)).toThrow('timed out');
+    expect(connections[0].online).toBe(false);
+    expect(connections[0].request.mock.calls.some(([r]) => r.cameraInput?.buttons === 2)).toBe(
+      false,
+    );
+  });
+  it('stream callbacks cannot interrupt cleanup and only one stream can attach', async () => {
+    const id = await open();
+    cameras.subscribe(id, () => {
+      throw new Error('broken browser');
+    });
+    expect(() => cameras.subscribe(id, () => {})).toThrow('already has');
+    expect(() => frame()).not.toThrow();
+    expect(() => cameras.status(id)).toThrow('stream failed');
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(connections[0].online).toBe(false);
+  });
+  it('renews the camera before a slow Discord permission refresh completes', async () => {
+    const id = await open();
+    frame();
+    authorize.mockImplementation(async () => new Promise(() => {}));
+    await vi.advanceTimersByTimeAsync(17000);
+    expect(connections[0].request.mock.calls.filter(([r]) => r.cameraSubscribe)).toHaveLength(3);
+    expect(cameras.status(id).rayAge).toBe(17000);
   });
   it('closes on camera disconnect without reconnecting or switching accounts mid-session', async () => {
     const id = await open();

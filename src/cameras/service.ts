@@ -3,7 +3,7 @@ import type { Config } from '../config';
 import type { Servers, PlayerCredentials } from '../servers';
 import { Connection, RustFailure } from '../rust/connection';
 import type { CameraInfo, CameraRays, RustResponse } from '../rust/protocol';
-import { CameraRegistry, CameraError, movement } from './registry';
+import { CameraRegistry, CameraError, movement, heldMovement } from './registry';
 import { CameraRenderer } from './renderer';
 import { log, errorCode } from '../log';
 
@@ -26,12 +26,23 @@ interface Session extends Ticket {
   seen: number;
   verified: number;
   renewing: boolean;
+  subscribed: number;
+  verifying: boolean;
   controlling: boolean;
   closing?: boolean;
   cleanupTimer?: NodeJS.Timeout;
   reason?: string;
   onRays?: (rays: CameraRays) => void;
   onStatus?: (state: string) => void;
+  stream?: (png?: Buffer) => void;
+  rays: number[];
+  renders: number[];
+  lastRayAt: number;
+  sequence: number;
+  held?: { actions: string[]; sequence: number; until: number };
+  inputAt: number;
+  inputNonzero: boolean;
+  inputPending?: number;
 }
 export function offlineMember(team: Team | undefined, steamId: string): boolean {
   const member = team?.members.find((m) => m.steamId.toString() === steamId);
@@ -48,10 +59,10 @@ export class Cameras {
     private monitor: (server: string) => Connection | undefined,
     private authorize: (server: string, user: string) => Promise<void>,
     private factory: (config: Config, server: string) => Connection = (config, server) =>
-      new Connection(config, () => [], undefined, 800, server),
+      new Connection(config, () => [], undefined, 500, server),
   ) {}
   start(): void {
-    this.timer ??= setInterval(() => this.tick(), 1000);
+    this.timer ??= setInterval(() => this.tick(), 100);
     this.timer.unref();
   }
   registry(server: string): CameraRegistry {
@@ -149,7 +160,15 @@ export class Cameras {
       verified: 0,
       frameAt: 0,
       renewing: false,
+      subscribed: 0,
+      verifying: false,
       controlling: false,
+      rays: [],
+      renders: [],
+      lastRayAt: 0,
+      sequence: 0,
+      inputAt: 0,
+      inputNonzero: false,
     };
     this.sessions.set(id, s); // Reserve before any await; simultaneous opens cannot add sockets.
     try {
@@ -234,17 +253,31 @@ export class Cameras {
         throw new CameraError('Rust+ did not provide camera capabilities.');
       this.guard(s);
       s.info = info;
+      s.subscribed = Date.now();
       s.renderer = new CameraRenderer(
         info,
         (png) => {
           if (!s.reason) {
             s.png = png;
             s.frameAt = Date.now();
+            s.sequence++;
+            s.renders.push(s.frameAt);
+            s.renders = s.renders.filter((at) => at > Date.now() - 5000).slice(-100);
+            try {
+              s.stream?.(png);
+            } catch {
+              this.close(id, 'Camera stream failed. Reopen the viewer.');
+            }
           }
         },
         () => this.close(id, 'Camera rendering failed or the server sent unsupported data.'),
       );
-      s.onRays = (rays) => s.renderer?.push(rays);
+      s.onRays = (rays) => {
+        s.lastRayAt = Date.now();
+        s.rays.push(s.lastRayAt);
+        s.rays = s.rays.filter((at) => at > Date.now() - 5000).slice(-500);
+        s.renderer?.push(rays);
+      };
       rust.on('cameraRays', s.onRays);
       s.seen = Date.now();
       return id;
@@ -301,7 +334,70 @@ export class Cameras {
       frameAt: s.frameAt,
       fresh: s.frameAt > Date.now() - 10000,
       expires: s.expires,
+      sequence: s.sequence,
+      frameAge: s.frameAt ? Date.now() - s.frameAt : null,
+      rayAge: s.lastRayAt ? Date.now() - s.lastRayAt : null,
+      rayFps: s.rays.filter((at) => at > Date.now() - 5000).length / 5,
+      renderFps: s.renders.filter((at) => at > Date.now() - 5000).length / 5,
     };
+  }
+  subscribe(id: string, listener: (png?: Buffer) => void): () => void {
+    const s = this.session(id);
+    if (s.stream) throw new CameraError('This viewer already has an open stream.');
+    s.stream = listener;
+    return () => {
+      if (s.stream === listener) s.stream = undefined;
+    };
+  }
+  hold(id: string, actions: string[], sequence: number): void {
+    const s = this.session(id);
+    if (!s.info || !Number.isSafeInteger(sequence) || sequence < 0)
+      throw new CameraError('Invalid held controls.');
+    heldMovement(actions, s.info.controlFlags);
+    if (s.held && sequence <= s.held.sequence) return; // Out-of-order HTTP arrivals cannot re-press released keys.
+    if (actions.length && (s.frameAt < Date.now() - 10000 || s.verified < Date.now() - 15000))
+      throw new CameraError('Wait for fresh camera data and account verification.');
+    s.held = { actions: [...actions], sequence, until: Date.now() + 1000 };
+  }
+  private pump(id: string, s: Session): void {
+    if (!s.held || s.controlling || !s.rust || !s.info || Date.now() - s.inputAt < 500) return;
+    if (s.held.until <= Date.now()) s.held.actions = [];
+    if (!s.held.actions.length && !s.inputNonzero) return;
+    s.controlling = true;
+    s.inputPending = Date.now();
+    const request = { cameraInput: movement('release', 0) };
+    void s.rust
+      .request(request, false, () => {
+        this.guard(s);
+        // Sample the latest keys at actual dispatch, after any subscription/verification wait.
+        const actions =
+          s.held &&
+          s.held.until > Date.now() &&
+          s.frameAt > Date.now() - 10000 &&
+          s.verified > Date.now() - 15000
+            ? s.held.actions
+            : [];
+        request.cameraInput = heldMovement(actions, s.info!.controlFlags);
+        s.inputAt = Date.now();
+        s.inputNonzero = !!(
+          request.cameraInput.buttons ||
+          request.cameraInput.mouseDelta.x ||
+          request.cameraInput.mouseDelta.y
+        );
+      })
+      .then((response) => {
+        if (!response.success) throw new RustFailure('protocol');
+      })
+      .catch(() =>
+        this.close(
+          id,
+          'Keyboard control failed; the session was closed. Movement was not retried.',
+        ),
+      )
+      .finally(() => {
+        s.controlling = false;
+        s.inputPending = undefined;
+      });
   }
   frame(id: string): Buffer | undefined {
     const s = this.session(id);
@@ -312,7 +408,8 @@ export class Cameras {
     if (!s.info || !s.rust || s.verified < Date.now() - 15000 || s.frameAt < Date.now() - 10000)
       throw new CameraError('Wait for a fresh camera frame and account verification.');
     const input = movement(action, s.info.controlFlags);
-    if (s.controlling) throw new CameraError('A movement is still running. Wait for it to finish.');
+    if (s.controlling || s.held?.actions.length)
+      throw new CameraError('A movement is still running. Wait for it to finish.');
     s.controlling = true;
     try {
       // A single short movement pulse, followed by neutral input at the normal request pace.
@@ -345,6 +442,14 @@ export class Cameras {
     s.renderer?.stop();
     s.renderer = undefined;
     s.png = undefined;
+    s.held = undefined;
+    const stream = s.stream;
+    s.stream = undefined;
+    try {
+      stream?.();
+    } catch {
+      /* A failed browser stream must not interrupt socket cleanup. */
+    }
     if (s.onRays) s.rust?.off('cameraRays', s.onRays);
     if (s.onStatus) s.rust?.off('status', s.onStatus);
     const rust = s.rust;
@@ -377,6 +482,12 @@ export class Cameras {
     this.prune();
     for (const [id, s] of this.sessions) {
       if (s.reason) continue;
+      if (s.inputPending !== undefined && Date.now() - s.inputPending > 2000) {
+        this.close(id, 'Keyboard input timed out. Open a fresh viewer.');
+        s.rust?.stop(); // Do not leave a possibly held input alive behind a stalled request.
+        continue;
+      }
+      this.pump(id, s);
       if (Date.now() - s.seen > 30000 || Date.now() >= s.expires) {
         this.close(id, 'Viewer idle or expired.');
         continue;
@@ -385,11 +496,27 @@ export class Cameras {
         this.close(id, 'No camera frames received for 30 seconds.');
         continue;
       }
-      if (!s.info || s.renewing || Date.now() - s.verified < 10000) continue;
+      if (!s.info) continue;
+      if (!s.verifying && Date.now() - s.verified >= 10000) {
+        s.verifying = true;
+        void this.verify(s)
+          .catch((error: unknown) =>
+            this.close(
+              id,
+              error instanceof CameraError
+                ? error.message
+                : 'Camera access or account verification failed.',
+            ),
+          )
+          .finally(() => {
+            s.verifying = false;
+          });
+      }
+      // Renew independently: a slow Discord role check must not starve the ray subscription.
+      if (s.renewing || Date.now() - s.subscribed < 8000) continue;
       s.renewing = true;
       void (async () => {
         try {
-          await this.verify(s);
           const info = (
             await s.rust!.request({ cameraSubscribe: { cameraId: s.camera } }, false, () =>
               this.guard(s),
@@ -402,6 +529,7 @@ export class Cameras {
             info.controlFlags !== s.info!.controlFlags
           )
             throw new CameraError('Camera capabilities changed. Reopen the viewer.');
+          s.subscribed = Date.now();
         } catch (error) {
           this.close(
             id,

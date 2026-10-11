@@ -19,6 +19,10 @@ const cameras = {
   })),
   frame: vi.fn(() => Buffer.from('PNG')),
   input: vi.fn(async () => {}),
+  hold: vi.fn(),
+  subscribe: vi.fn<(id: string, listener: (png?: Buffer) => void) => ReturnType<typeof vi.fn>>(() =>
+    vi.fn(),
+  ),
 };
 beforeEach(async () => {
   vi.clearAllMocks();
@@ -91,6 +95,36 @@ it('requires same-origin JSON mutations and a session cookie, with bounded stric
   ).toBe(403);
   expect((await post(path + '/input', { action: 'look-left' }, cookie)).status).toBe(200);
   expect(cameras.input).toHaveBeenCalledWith(session, 'look-left');
+  expect(
+    (await post(path + '/input', { actions: ['forward', 'right'], sequence: 1 }, cookie)).status,
+  ).toBe(200);
+  expect(cameras.hold).toHaveBeenCalledWith(session, ['forward', 'right'], 1);
+  expect((await post(path + '/input', { actions: [], sequence: -1 }, cookie)).status).toBe(400);
   expect((await post(path + '/stop', {}, cookie)).status).toBe(200);
   expect(cameras.close).toHaveBeenCalledWith(session);
+});
+it('streams frames without proxy buffering using the private session cookie and cleans up disconnects', async () => {
+  const { path, cookie } = await open();
+  expect((await fetch(base + path + '/stream')).status).toBe(400);
+  const controller = new AbortController();
+  const response = await fetch(base + path + '/stream', {
+    headers: { Cookie: cookie },
+    signal: controller.signal,
+  });
+  expect(response.headers.get('content-type')).toContain('text/event-stream');
+  expect(response.headers.get('x-accel-buffering')).toBe('no');
+  const reader = response.body!.getReader();
+  const first = await reader.read();
+  expect(Buffer.from(first.value!).toString()).toContain('event: status');
+  const listener = cameras.subscribe.mock.calls[0][1];
+  listener(Buffer.from('new frame'));
+  const second = await reader.read();
+  expect(Buffer.from(second.value!).toString()).toContain(
+    Buffer.from('new frame').toString('base64'),
+  );
+  controller.abort();
+  await vi.waitFor(() =>
+    expect(cameras.close).toHaveBeenCalledWith(session, expect.stringContaining('disconnected')),
+  );
+  expect(cameras.subscribe.mock.results[0].value).toHaveBeenCalledOnce();
 });
