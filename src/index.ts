@@ -1,7 +1,7 @@
 import { loadConfig } from './config';
 import { Store } from './database';
-import { Connection } from './rust/connection';
-import { Bot } from './discord/bot';
+import { DiscordHost } from './discord/host';
+import { Servers } from './servers';
 import { log, errorCode } from './log';
 
 async function main(): Promise<void> {
@@ -31,8 +31,8 @@ async function main(): Promise<void> {
   }
   store.set('discordGuild', config.DISCORD_GUILD_ID);
   store.set('rustScope', scope);
-  const rust = new Connection(config, () => store.devices());
-  const bot = new Bot(config, store, rust);
+  const servers = new Servers(config, store);
+  const bot = new DiscordHost(config, servers);
   let closing = false;
   const shutdown = async (exitCode = 0) => {
     if (exitCode) process.exitCode = exitCode;
@@ -49,6 +49,7 @@ async function main(): Promise<void> {
       process.exitCode = 1;
     } finally {
       try {
+        servers.close();
         store.close();
       } catch (error) {
         log.error({ code: errorCode(error) }, 'Unable to close SQLite');
@@ -83,7 +84,7 @@ async function main(): Promise<void> {
 void main().catch((error) => {
   log.fatal(
     { code: errorCode(error) },
-    'Cannot initialize bot; check database path and server scope',
+    'Cannot initialize bot; check database path, credentials.key backup and server scope',
   );
   process.exitCode = 1;
 });

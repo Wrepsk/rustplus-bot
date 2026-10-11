@@ -13,7 +13,7 @@ export class RustFailure extends Error {
   ) {
     super(
       {
-        auth: 'Rust+ rejected credentials. Re-pair the server and update the environment.',
+        auth: 'Rust+ rejected credentials. Re-pair the server through /pair or update the environment.',
         rate: 'Rust+ rate limited this request. Wait before trying again.',
         timeout: 'Rust+ did not respond. The connection is being recovered.',
         protocol: 'Rust+ returned an invalid response.',
@@ -52,6 +52,7 @@ export class Connection extends EventEmitter {
     private devices: () => Device[],
     private factory: () => RustClient = () => createRustClient(config),
     private paceMs = 800,
+    private serverId?: string,
   ) {
     super();
     this.transport = config.RUST_USE_PROXY ? 'proxy' : 'direct';
@@ -76,7 +77,7 @@ export class Connection extends EventEmitter {
   private status(state: ConnectionState): void {
     this.state = state;
     this.emit('status', state);
-    log.info({ state }, 'Rust+ connection state');
+    log.info({ server: this.serverId, state }, 'Rust+ connection state');
   }
   start(): void {
     if (!this.stopped) return;
@@ -119,7 +120,7 @@ export class Connection extends EventEmitter {
     });
     client.on('error', (error: unknown) => {
       log.warn(
-        { transport: this.transport, ...transportErrorDetails(error) },
+        { server: this.serverId, transport: this.transport, ...transportErrorDetails(error) },
         'Rust+ transport error',
       );
       if (current()) this.recover();
@@ -161,7 +162,10 @@ export class Connection extends EventEmitter {
       try {
         await this.queryDevice(device.id, true);
       } catch {
-        log.warn({ entityId: device.id }, 'Device subscription unavailable; will retry');
+        log.warn(
+          { server: this.serverId, entityId: device.id },
+          'Device subscription unavailable; will retry',
+        );
       }
     }
     if (generation !== this.generation || this.stopped) return;

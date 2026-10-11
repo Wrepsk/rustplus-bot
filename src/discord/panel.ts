@@ -27,6 +27,7 @@ export class Panel {
     private client: Client,
     private store: Store,
     private devices: Devices,
+    private label?: string,
   ) {
     devices.on('update', this.onUpdate);
   }
@@ -64,6 +65,7 @@ export class Panel {
         text: `Page ${page + 1}/${pages} • ON/OFF describes switch power, not physical door position`,
       })
       .setTimestamp();
+    if (this.label) embed.setAuthor({ name: this.label.slice(0, 256) });
     const components: ActionRowBuilder<ButtonBuilder>[] = [];
     for (const device of shown) {
       const state = this.devices.states.get(device.id),

@@ -76,7 +76,7 @@ export class Store {
     const parsed = deviceSchema.safeParse(input);
     if (!parsed.success) throw new Error('Invalid entity ID, name or device type.');
     const d = parsed.data;
-    if (this.devices().length >= 100) throw new Error('Maximum 100 devices per bot.');
+    if (this.devices().length >= 100) throw new Error('Maximum 100 devices per server.');
     if (this.devices().some((x) => x.id === d.id))
       throw new Error('Entity ID is already registered.');
     this.db

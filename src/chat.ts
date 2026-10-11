@@ -6,6 +6,7 @@ import { RustFailure, type Connection } from './rust/connection';
 import type { RustResponse } from './rust/protocol';
 import type { Permissions } from './permissions';
 import { log, errorCode } from './log';
+import { ChatIdentityError, type ChatSender } from './chat-identities';
 
 export class ChatBridge {
   private sent = new ExpiringSet(300000);
@@ -33,6 +34,7 @@ export class ChatBridge {
     private store: Store,
     private config: Config,
     private permissions: Permissions,
+    private sender?: ChatSender,
   ) {
     rust.on('ready', () => {
       void this.reset();
@@ -155,6 +157,7 @@ export class ChatBridge {
         }
         if (
           isEcho(message, this.config.RUST_STEAM_ID, this.sent) ||
+          this.sender?.isOwn(message) ||
           (message.steamId.toString() === this.config.RUST_STEAM_ID &&
             (this.store.echo(message.message) || message.message.startsWith('[Discord] '))) ||
           (!historical && this.fingerprints.has(fingerprint))
@@ -221,6 +224,7 @@ export class ChatBridge {
     const epoch = this.epoch,
       teamGeneration = this.teamGeneration;
     const availableAtArrival = this.rust.online && this.active;
+    let deliveredParts = 0;
     ++this.pending;
     const task = this.outbound
       .catch(() => {})
@@ -275,17 +279,22 @@ export class ChatBridge {
             !this.active
           )
             throw new Error('Chat session changed');
-          const response = await this.rust.request(
-            { sendTeamMessage: { message: chunk } },
-            false,
-            () => {
-              beforeSend();
-              // Record at actual dispatch, rather than before a potentially slow Rust+ queue.
-              this.sent.add(chunk);
-              this.store.saveEcho(chunk);
-            },
-          );
-          if (!response.success) throw new Error('No chat acknowledgement');
+          const dispatch = () => {
+            beforeSend();
+            // Record at actual dispatch, rather than before a potentially slow Rust+ queue.
+            this.sent.add(chunk);
+            this.store.saveEcho(chunk);
+          };
+          if (this.sender) await this.sender.send(message.author.id, chunk, dispatch);
+          else {
+            const response = await this.rust.request(
+              { sendTeamMessage: { message: chunk } },
+              false,
+              dispatch,
+            );
+            if (!response.success) throw new Error('No chat acknowledgement');
+          }
+          ++deliveredParts;
         }
       })
       .catch(async (error) => {
@@ -297,7 +306,9 @@ export class ChatBridge {
         await message
           .reply({
             content:
-              'Rust+ could not confirm delivery. Some parts may have arrived. Check in-game chat before resending.',
+              error instanceof ChatIdentityError
+                ? `${error.message}${deliveredParts ? ' Earlier parts were sent. Check in-game chat before resending.' : ''}`
+                : 'Rust+ could not confirm delivery. Some parts may have arrived. Check in-game chat before resending.',
             allowedMentions: { repliedUser: false, parse: [] },
           })
           .catch((replyError) =>

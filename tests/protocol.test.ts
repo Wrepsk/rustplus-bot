@@ -1,4 +1,6 @@
 import { once } from 'node:events';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
@@ -7,6 +9,8 @@ import type { Client, Message } from 'discord.js';
 import { ChatBridge } from '../src/chat';
 import { Store } from '../src/database';
 import { Permissions } from '../src/permissions';
+import { Servers } from '../src/servers';
+import { ChatIdentities } from '../src/chat-identities';
 import type { Config } from '../src/config';
 import { Connection } from '../src/rust/connection';
 import type { TeamMessage } from '../src/domain';
@@ -51,7 +55,7 @@ describe('installed rustplus.js protocol compatibility', () => {
       const address = server.address();
       if (typeof address === 'string' || !address) throw new Error('No mock server address');
       const requests: Record<string, unknown>[] = [];
-      let peer: WebSocket | undefined;
+      let primaryPeer: WebSocket | undefined;
       let switchValue = false;
       let initialFrame: Uint8Array | undefined;
       const offlineMember = {
@@ -79,15 +83,18 @@ describe('installed rustplus.js protocol compatibility', () => {
         mapNotes: [{ x: 10, y: 20, ...(omitDefaults ? {} : { type: 0 }) }],
         leaderMapNotes: [omitDefaults ? {} : { type: 0, x: 0, y: 0 }],
       };
-      const send = (message: Record<string, unknown>) =>
-        peer!.send(messageType.encode(messageType.fromObject(message)).finish());
+      const send = (message: Record<string, unknown>, target?: WebSocket) => {
+        const bytes = messageType.encode(messageType.fromObject(message)).finish();
+        if (target) target.send(bytes);
+        else for (const client of server.clients) client.send(bytes);
+      };
       server.on('connection', (socket) => {
-        peer = socket;
         socket.on('message', (bytes) => {
           const request = requestType.toObject(requestType.decode(Buffer.from(bytes as Buffer)), {
             longs: String,
           });
           requests.push(request);
+          if (request.playerId === '76561198000000000') primaryPeer = socket;
           const response: Record<string, unknown> = { seq: request.seq };
           if (request.getInfo)
             response.info = {
@@ -129,7 +136,7 @@ describe('installed rustplus.js protocol compatibility', () => {
                 broadcast: {
                   teamMessage: {
                     message: {
-                      steamId: '76561198000000000',
+                      steamId: request.playerId,
                       name: 'ConnectedPlayer',
                       message: (request.sendTeamMessage as { message: string }).message,
                       ...(omitDefaults ? {} : { color: '', time: 0 }),
@@ -140,10 +147,16 @@ describe('installed rustplus.js protocol compatibility', () => {
           }
           if (request.getInfo && !initialFrame)
             initialFrame = messageType.encode(messageType.fromObject({ response })).finish();
-          send({ response });
+          send({ response }, socket);
         });
       });
+      const directory = mkdtempSync(join(tmpdir(), 'rust-protocol-test-'));
+      if (!directory.startsWith(join(tmpdir(), 'rust-protocol-test-')))
+        throw new Error('Unsafe cleanup path');
       const config = {
+        DATABASE_PATH: join(directory, 'bot.sqlite'),
+        BASE_NAME: 'Main Base',
+        ADMIN_USER_ID: 'owner',
         RUST_SERVER_IP: '127.0.0.1',
         RUST_APP_PORT: address.port,
         RUST_STEAM_ID: '76561198000000000',
@@ -163,6 +176,14 @@ describe('installed rustplus.js protocol compatibility', () => {
         0,
       );
       const store = new Store(':memory:');
+      const servers = new Servers(config, store);
+      servers.link('default', 'friend', { playerId: '76561198000000001', playerToken: '-456' });
+      const identities = new ChatIdentities(
+        servers,
+        'default',
+        connection,
+        (personalConfig) => new Connection(personalConfig, () => [], undefined, 0),
+      );
       store.set('chatChannel', 'channel');
       const discordSend = vi.fn(async () => ({}));
       const bridge = new ChatBridge(
@@ -173,6 +194,7 @@ describe('installed rustplus.js protocol compatibility', () => {
         store,
         config,
         new Permissions('guild', 'owner', () => ['operator']),
+        identities,
       );
       try {
         const ready = once(connection, 'ready');
@@ -296,15 +318,15 @@ describe('installed rustplus.js protocol compatibility', () => {
           content: 'Hello Rust',
           channelId: 'channel',
           guildId: 'guild',
-          author: { id: 'owner', bot: false },
+          author: { id: 'friend', bot: false },
           webhookId: null,
           guild: {
             members: {
               fetch: async () => ({
-                id: 'owner',
+                id: 'friend',
                 displayName: 'Alper',
                 permissions: { has: () => false },
-                roles: { cache: new Map() },
+                roles: { cache: new Map([['operator', {}]]) },
               }),
             },
           },
@@ -314,6 +336,8 @@ describe('installed rustplus.js protocol compatibility', () => {
         expect(reply).not.toHaveBeenCalled();
         expect(requests).toContainEqual(
           expect.objectContaining({
+            playerId: '76561198000000001',
+            playerToken: -456,
             sendTeamMessage: { message: '[Discord] Alper: Hello Rust' },
           }),
         );
@@ -324,7 +348,7 @@ describe('installed rustplus.js protocol compatibility', () => {
         );
         expect(connection.state).toBe('connected');
         const restored = once(connection, 'ready');
-        peer!.terminate();
+        primaryPeer!.terminate();
         await restored;
         expect(
           requests
@@ -332,7 +356,9 @@ describe('installed rustplus.js protocol compatibility', () => {
             .map((r) => r.entityId)
             .slice(-2),
         ).toEqual([42, 43]);
-        expect(requests.filter((r) => r.getInfo)).toHaveLength(2);
+        expect(
+          requests.filter((r) => r.getInfo && r.playerId === config.RUST_STEAM_ID),
+        ).toHaveLength(2);
         expect(connection.state).toBe('connected');
         await vi.waitFor(() => expect(bridge.status()).toContain('Live'));
         const duplicate = once(connection, 'chat');
@@ -342,11 +368,14 @@ describe('installed rustplus.js protocol compatibility', () => {
         expect(discordSend).toHaveBeenCalledOnce();
       } finally {
         bridge.stop();
+        identities.stop();
         connection.stop();
         await bridge.drain();
+        servers.close();
         store.close();
         for (const client of server.clients) client.terminate();
         await new Promise<void>((resolve) => server.close(() => resolve()));
+        rmSync(directory, { recursive: true, force: true });
       }
     },
     10000,

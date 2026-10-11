@@ -20,3 +20,5 @@ rustplus.config.json
 *.sqlite3-*
 *pairing*.json
 .rustplus/
+credentials.key
+*.credentials.key

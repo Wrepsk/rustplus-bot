@@ -1,6 +1,39 @@
 # Rust+ Discord Base Bot
 
-A self-hosted, single-server / single-guild bot for your friends: native Discord base controls, real Smart Alarm notifications and two-way Rust team chat. TypeScript, discord.js 14.27.0, rustplus.js 2.5.0 and SQLite. No website, inbound HTTP listener or hosted database.
+A self-hosted, multi-server / single-guild bot for your friends: native Discord base controls, real Smart Alarm notifications and two-way Rust team chat using each member's personal Rust+ identity. TypeScript, discord.js 14.27.0, rustplus.js 2.5.0 and SQLite. No hosted website, inbound HTTP listener or hosted database.
+
+## Existing installation: easier pairing and multiple servers
+
+Your current `.env`, SQLite registrations, alerts, roles and panel IDs continue to work. The original server becomes profile `default`; the configured administrator's existing Rust+ pairing is imported as their personal chat identity once. **Other Discord members must now link their own Rust+ pairing to send chat. There is no shared-account fallback.** Rust-to-Discord chat remains available without linking every reader.
+
+Back up the **entire** data volume before upgrading, then rebuild/recreate the image. The first run creates `/app/data/credentials.key` (local: beside `DATABASE_PATH`) and additional databases in `servers/` beside the original database. Newly imported server, FCM and personal player credentials are encrypted with this key. Keep the key with private backups: losing it makes saved credentials unreadable. Steam passwords, Steam Guard codes, cookies and the upstream companion auth token are never transferred to the bot. Existing `.env` secrets remain in `.env`.
+
+1. Run `/pair start` in Discord. It returns a private helper command valid for 15 minutes.
+2. On **your PC**, install Node 22.13+ and Chrome, clone/download this project, run `npm ci`, then paste that command: `npm run pair -- --code <code-from-discord>`. No Discord `.env` is needed on a friend's PC. Existing `rustplus.config.json` is reused. Use `--config <path>` for a custom file, or `--register` to repeat registration.
+3. If needed, Chrome opens the upstream Rust Companion/Steam login flow. Log in on Steam's page. The helper prints one encrypted `/pair import data:…` command; paste it into Discord. Only encrypted credential data travels through Discord. Raw tokens are not printed by the helper.
+4. Close any local `fcm-listen` using that registration. The **VPS** now keeps the FCM listener running, including after restarts. Check `/pair status` for `listening` before pairing in-game. Allow outbound TCP **5228** to `mtalk.google.com` and outbound HTTPS as appropriate; no inbound VPS ports are required.
+5. In Rust, click **Pair with Server**. Run `/pair inbox`, then `/pair accept id:<pairing-id>`. Administrators can add monitored servers; operators can link only to existing servers. Chat checks that your Steam account belongs to the mirrored Rust team before dispatch.
+6. For a Smart Switch/Alarm, use **Pair** on the device in-game, then `/pair inbox` and `/pair accept id:<pairing-id> name:Garage`. Devices require administrator approval. Set `sensitive:true` for destructive equipment. Pairing only registers/queries the device; it never activates it. Existing registrations are retained; rename them with `/device rename`.
+
+This removes the recurring need to run `fcm-listen` or copy raw IDs/tokens. Browser sign-in and the in-game Pair action remain necessary. The helper exits after import. If FCM reports `invalid-credentials`, repeat `/pair start` with `--register`. Inbox pairings are private, deduplicated and expire after 24 hours.
+
+### Multiple servers without restarting the bot
+
+Enabled profiles run simultaneously, each with independent devices, subscriptions, panels, alarm cooldowns/outboxes, chat history and channel settings. Additional servers do not inherit the first alert destination. After accepting a server pairing:
+
+```text
+/server list
+/server use id:<server-id>
+/settings alerts channel:#second-alerts server:<server-id>
+/chat setup channel:#second-chat server:<server-id>
+/panel server:<server-id>
+```
+
+Configure operator roles per server with `/settings role-add role:@Operators server:<id>`. Commands accept an optional `server` ID. Otherwise a dedicated chat/panel channel selects its server; elsewhere your personal, persistent `/server use` selection applies. Panel buttons always target the server belonging to their saved message. Use distinct panel channels and **distinct chat channels**; duplicate chat channels are rejected.
+
+`/server pause server:<id>` and `/server resume server:<id>` affect only that server. Fresh pairing by an administrator for the existing monitoring Steam identity refreshes its token without replacing devices. A friend's pairing links personal chat and does not replace the monitoring account. Use these commands to switch servers instead of changing the original environment variables. Up to 10 server profiles and 50 paired users are supported.
+
+Every chat author needs their **own Rust+ server pairing**, not just Steam OpenID or a Steam ID. Messages use their player ID/token and retain the `[Discord] DisplayName:` prefix. Personal connections open on demand, reuse existing sockets, and close after 60 seconds idle. At most three additional personal connections per server run alongside monitoring, below the upstream documented default of five per source IP/server, assuming no other automation or alternate-hostname profiles share that endpoint. Stricter server limits may require fewer active users. Uncertain sends are not retried automatically; rejected personal credentials pause until a new pairing. `/pair unlink` removes your listener and personal chat credentials across servers; shared monitoring remains configured. An explicitly unlinked administrator is not automatically relinked on restart.
 
 ## Before you start
 
@@ -51,11 +84,11 @@ npx @liamcottle/rustplus.js --config-file=./private-pairing.json fcm-register
 npx @liamcottle/rustplus.js --config-file=./private-pairing.json fcm-listen
 ```
 
-Keep any custom pairing file outside the project. The running bot does **not** need FCM registration files, Chrome or a continuously running pairing CLI. Only copy the four server fields to your VPS. CLI pairing depends on third-party FCM/Expo/Steam services and may need upstream fixes if those services change.
+Keep any custom pairing file outside the project. This manual flow bootstraps the first server or recovers without Discord. The bot needs neither Chrome nor the full desktop registration file: `/pair import` transfers only encrypted FCM Android ID/security-token material so the VPS can listen for later pairings. Pairing depends on third-party FCM/Expo/Steam services and may need upstream fixes if those services change.
 
 ## 3. Obtain Smart Switch and Smart Alarm entity IDs
 
-Keep `fcm-listen` running, return to the same Rust server, look at your placed **Smart Switch** or **Smart Alarm**, and use its in-game **Pair** interaction (hold the use key to open its interaction menu where necessary). The device notification includes its entity ID, type and server information. Use that ID for `/device add`. You need the normal in-game access required to pair the device; administrator-only debug commands are unnecessary.
+Prefer `/pair start` and the VPS listener above, then pair in-game and accept through `/pair inbox`. For manual registration, keep `fcm-listen` running, look at your **Smart Switch** or **Smart Alarm**, and use its in-game **Pair** interaction. Use the notification's entity ID for `/device add`. Normal in-game device access is required; administrator-only debug commands are unnecessary. Do not run the VPS listener and local `fcm-listen` against the same registration concurrently.
 
 Do not substitute an electrical branch/ordinary switch/door ID. A door cannot be controlled directly: wire a **Smart Switch** to the desired circuit. Register devices paired to the same Steam account and server as the bot. After a wipe, destroyed/replaced devices usually need fresh pairing and registration. The bot verifies registered device types when it queries Rust+; an inaccessible or mismatched device is shown as unknown and retried.
 
@@ -178,7 +211,7 @@ docker compose run --rm --no-deps --entrypoint tar rust-bot -C /app/data -czf - 
 docker compose start
 ```
 
-To restore, stop the service and copy/extract the backup into its named volume with ownership readable/writable by UID 1000 (the container's Node user). Keep backups private. The SQLite database contains guild configuration, device IDs and short-lived relayed-chat deduplication text, not Discord/Rust login tokens. Wipes/server changes should use a new volume or remove obsolete registrations deliberately.
+To restore, stop the service and extract the entire backup into its named volume with ownership readable/writable by UID 1000 (the container's Node user). Keep backups private: the databases now include encrypted Rust+/FCM credentials, and `credentials.key` is required to decrypt them. Include every `servers/*.sqlite` database, WAL/SHM files and the key. Discord tokens and Steam passwords are not stored in SQLite. Use server profiles to switch servers; after a wipe, deliberately remove/re-pair obsolete devices.
 
 ## Troubleshooting and validation
 
@@ -208,6 +241,6 @@ Tests use mocks, controlled timers, local SQLite and a loopback WebSocket server
 
 The integration was checked against the installed rustplus.js source and protocol, its [device broadcast example](https://github.com/liamcottle/rustplus.js/blob/master/examples/4_entity_changed_broadcasts.js), [request example](https://github.com/liamcottle/rustplus.js/blob/master/examples/6_async_requests.js) and [documented request budgets](https://github.com/liamcottle/rustplus.js#rate-limits). `src/rust/protocol.ts` defines only the protocol fields used by this bot. `src/rust/connection.ts` wraps the verified callback API with timeout cleanup; it deliberately consumes handled responses instead of emitting them again as generic messages.
 
-Dependency overrides update protobufjs and the pairing CLI's form-data/qs packages. `npm audit` currently reports 11 moderate advisories in upstream bundled dependencies, with no high or critical advisories in either the full or production tree. Remaining issues involve the legacy pairing CLI's request/tough-cookie/uuid chain and the camera image decoder's file-type chain. This bot never runs the pairing CLI or decodes camera images at runtime. Avoid forcing incompatible major replacements of these packages; review upstream releases and rerun the protocol tests when updating. Pairing itself remains a manual desktop step using the upstream CLI. The current dependency lockfile is included for reproducible installs.
+Dependency overrides update protobufjs and the pairing CLI's form-data/qs packages. `npm audit` reports 11 moderate advisories in upstream bundled dependencies, with no high or critical findings. The VPS now loads the push receiver for pairing, but its check-in uses native bounded fetch instead of the legacy request/retry helper; the affected request/cookie operations are not used on that runtime path. The desktop registration CLI still uses the legacy chain. Camera/file-type decoding and vulnerable uuid algorithms remain unused. No incompatible major overrides were introduced; review [SECURITY_REVIEW.md](SECURITY_REVIEW.md) and rerun protocol tests when updating. The lockfile remains reproducible.
 
 Code is split into configuration/logging, SQLite storage, permissions, device/alarm transitions, the Rust connection manager, the team-chat bridge and Discord command/panel/alert modules. There is no arbitrary command execution path in Discord. Only registered switch entity IDs can reach a state-changing Rust+ request.

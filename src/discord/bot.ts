@@ -29,6 +29,14 @@ import { Panel } from './panel';
 import { Alerts, AlertDeliveryError } from './alerts';
 import { commands } from './commands';
 import { ConnectionNotifications } from '../connection-notifications';
+import type { ChatSender } from '../chat-identities';
+
+interface BotRuntime {
+  client: Client;
+  sender: ChatSender;
+  label: string;
+  validateChatChannel: (id: string) => void;
+}
 
 interface Confirmation {
   user: string;
@@ -38,15 +46,18 @@ interface Confirmation {
   name: string;
 }
 export class Bot {
-  readonly client = new Client({
-    intents: [
-      GatewayIntentBits.Guilds,
-      GatewayIntentBits.GuildMessages,
-      GatewayIntentBits.MessageContent,
-    ],
-    allowedMentions: { parse: [], repliedUser: false },
-    rest: { timeout: 10000, retries: 2 },
-  });
+  readonly client: Client;
+  static createClient(): Client {
+    return new Client({
+      intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+      ],
+      allowedMentions: { parse: [], repliedUser: false },
+      rest: { timeout: 10000, retries: 2 },
+    });
+  }
   readonly devices: Devices;
   readonly permissions: Permissions;
   readonly panel: Panel;
@@ -66,15 +77,17 @@ export class Bot {
     private config: Config,
     private store: Store,
     private rust: Connection,
+    private runtime?: BotRuntime,
   ) {
+    this.client = runtime?.client || Bot.createClient();
     this.permissions = new Permissions(config.DISCORD_GUILD_ID, config.ADMIN_USER_ID, () =>
       store.get('allowedRoles', config.ALLOWED_ROLE_IDS),
     );
     this.devices = new Devices(store, rust, config.ALARM_COOLDOWN_SECONDS);
-    this.panel = new Panel(this.client, store, this.devices);
+    this.panel = new Panel(this.client, store, this.devices, runtime?.label);
     this.alerts = new Alerts(this.client, store, config);
     this.connectionNotifications = new ConnectionNotifications(rust, store, this.alerts);
-    this.chat = new ChatBridge(this.client, rust, store, config, this.permissions);
+    this.chat = new ChatBridge(this.client, rust, store, config, this.permissions, runtime?.sender);
     this.devices.on('alarm', (device) => this.alerts.enqueue(device));
     this.devices.on('alarmActive', (device) => {
       try {
@@ -84,6 +97,8 @@ export class Bot {
       }
     });
     rust.on('health', () => this.panel.schedule());
+    // The multi-server host owns the single Discord event dispatcher/login.
+    if (runtime) return;
     this.client.on(Events.InteractionCreate, (interaction) => {
       if (!this.stopping) this.track(this.interaction(interaction), 'interaction');
     });
@@ -118,12 +133,24 @@ export class Bot {
       );
     this.client.once(Events.ClientReady, () => {
       log.info('Discord ready');
-      this.alerts.start();
-      this.rust.start();
-      this.panel.schedule();
-      this.rust.refreshHealth();
+      this.startServices();
     });
     await this.client.login(this.config.DISCORD_TOKEN);
+  }
+  startServices(): void {
+    this.alerts.start();
+    this.rust.start();
+    this.panel.schedule();
+    this.rust.refreshHealth();
+  }
+  ownsButton(id: string, messageId: string): boolean {
+    return (
+      this.panel.isPanel(messageId) ||
+      (id.startsWith('confirm:') && this.confirmations.has(id.split(':')[1]))
+    );
+  }
+  dispatch(interaction: Interaction): void {
+    if (!this.stopping) this.track(this.interaction(interaction), 'interaction');
   }
   private async principal(
     interaction: ChatInputCommandInteraction | ButtonInteraction,
@@ -395,6 +422,7 @@ export class Bot {
     }
     if (name === 'chat') {
       if (sub === 'setup') {
+        this.runtime?.validateChatChannel(options.getChannel('channel', true).id);
         this.store.set('chatChannel', options.getChannel('channel', true).id);
         this.store.set('chatEnabled', true);
       }
@@ -452,7 +480,7 @@ export class Bot {
     }
     await reply(
       'Rust+ bot commands',
-      '`/panel` — Create or refresh base controls (admin)\n`/device add|remove|rename|list|status` — Manage paired devices (admin)\n`/alarm list|enable|disable|test` — Smart Alarm notifications (admin)\n`/chat setup|enable|disable|status` — Team chat synchronization\n`/settings role-add|role-remove|roles|alerts` — Configure access and alerts (admin)\n`/status` — Connection, server and device information\n`/ping` — Latency\n`/help` — This guide\n\nSwitch buttons and Discord-to-Rust chat require an operator role or administrator access. Switch power does not indicate physical door position.',
+      '`/panel` — Create or refresh base controls (admin)\n`/device add|remove|rename|list|status` — Manage paired devices (admin)\n`/alarm list|enable|disable|test` — Smart Alarm notifications (admin)\n`/chat setup|enable|disable|status` — Team chat synchronization\n`/settings role-add|role-remove|roles|alerts` — Configure access and alerts (admin)\n`/server list|use|pause|resume` — Manage saved Rust servers\n`/pair start|import|inbox|accept|status|unlink` — Pair servers, devices and personal chat accounts\n`/status` — Connection, server and device information\n`/ping` — Latency\n`/help` — This guide\n\nUse the optional server argument to select a server. Switch buttons and Discord-to-Rust chat require an operator role or administrator access. Personal Rust+ linking is required for chat. Switch power does not indicate physical door position.',
     );
   }
   private deviceList(alarmsOnly = false, page = 1): string {
@@ -470,11 +498,20 @@ export class Bot {
         .join('\n') + `\n\nPage ${page}/${pages} • Use the page option to see more.`
     );
   }
-  async stop(): Promise<void> {
+  async stop(updatePanel = false): Promise<void> {
     this.stopping = true;
     this.connectionNotifications.stop();
     this.chat.stop();
     this.rust.stop();
+    if (updatePanel)
+      await this.panel
+        .refresh()
+        .catch((error) =>
+          log.warn(
+            { code: errorCode(error) },
+            'Could not mark the paused server panel disconnected',
+          ),
+        );
     this.panel.stop();
     await Promise.allSettled([
       this.chat.drain(),
@@ -482,7 +519,7 @@ export class Bot {
       this.alerts.stop(),
       ...this.tasks,
     ]);
-    await this.client.destroy();
+    if (!this.runtime) await this.client.destroy();
   }
 }
-class UserError extends Error {}
+export class UserError extends Error {}

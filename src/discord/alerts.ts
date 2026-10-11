@@ -170,6 +170,7 @@ export class Alerts {
         embeds: [
           new EmbedBuilder()
             .setTitle(notification.title)
+            .setFooter({ text: this.config.BASE_NAME })
             .setDescription(notification.description)
             .setColor(notification.title.startsWith('✅') ? 0x42b883 : 0xe5a742)
             .setTimestamp(notification.at),

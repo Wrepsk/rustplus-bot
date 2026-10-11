@@ -1,7 +1,74 @@
-import { ChannelType, SlashCommandBuilder } from 'discord.js';
+import { ApplicationCommandOptionType, ChannelType, SlashCommandBuilder } from 'discord.js';
 
 const idOption = { name: 'id', description: 'Registered Rust+ entity ID', required: true };
 export const commands = [
+  new SlashCommandBuilder()
+    .setName('server')
+    .setDescription('Manage saved Rust servers')
+    .addSubcommand((s) =>
+      s.setName('list').setDescription('List all servers and their connection states'),
+    )
+    .addSubcommand((s) =>
+      s
+        .setName('use')
+        .setDescription('Select the server for your commands')
+        .addStringOption((o) =>
+          o.setName('id').setDescription('Server ID from /server list').setRequired(true),
+        ),
+    )
+    .addSubcommand((s) =>
+      s.setName('pause').setDescription('Pause monitoring and chat for this server'),
+    )
+    .addSubcommand((s) =>
+      s.setName('resume').setDescription('Resume monitoring and chat for this server'),
+    ),
+  new SlashCommandBuilder()
+    .setName('pair')
+    .setDescription('Pair Rust+ accounts, servers and devices')
+    .addSubcommand((s) =>
+      s.setName('start').setDescription('Get the one-time local helper command'),
+    )
+    .addSubcommand((s) =>
+      s
+        .setName('import')
+        .setDescription('Import encrypted credentials from the local helper')
+        .addStringOption((o) =>
+          o
+            .setName('data')
+            .setDescription('Encrypted output from the helper')
+            .setRequired(true)
+            .setMaxLength(4000),
+        ),
+    )
+    .addSubcommand((s) =>
+      s.setName('inbox').setDescription('Show your recent in-game server and device pairings'),
+    )
+    .addSubcommand((s) =>
+      s
+        .setName('accept')
+        .setDescription('Save a server/device or link your personal chat account')
+        .addStringOption((o) =>
+          o
+            .setName('id')
+            .setDescription('Pairing ID from /pair inbox')
+            .setRequired(true)
+            .setMaxLength(12),
+        )
+        .addStringOption((o) =>
+          o.setName('name').setDescription('Friendly server/device name').setMaxLength(60),
+        )
+        .addBooleanOption((o) =>
+          o.setName('sensitive').setDescription('Require confirmation before changing this switch'),
+        ),
+    )
+    .addSubcommand((s) =>
+      s.setName('status').setDescription('Show your pairing and personal chat status'),
+    )
+    .addSubcommand((s) =>
+      s
+        .setName('unlink')
+        .setDescription('Remove your pairing listener and personal chat identities'),
+    ),
   new SlashCommandBuilder()
     .setName('panel')
     .setDescription('Create or refresh the base control panel'),
@@ -162,14 +229,27 @@ export const commands = [
         ),
     ),
   ...['status', 'help', 'ping'].map((name) =>
-    new SlashCommandBuilder()
-      .setName(name)
-      .setDescription(
-        {
-          status: 'Show Rust+ and bot status',
-          help: 'Show commands and setup tips',
-          ping: 'Show Discord latency and Rust+ availability',
-        }[name]!,
-      ),
+    new SlashCommandBuilder().setName(name).setDescription(
+      {
+        status: 'Show Rust+ and bot status',
+        help: 'Show commands and setup tips',
+        ping: 'Show Discord latency and Rust+ availability',
+      }[name]!,
+    ),
   ),
-].map((command) => command.setDMPermission(false).toJSON());
+].map((command) => {
+  const json = command.setDMPermission(false).toJSON();
+  const option = {
+    type: ApplicationCommandOptionType.String as const,
+    name: 'server',
+    description: 'Server ID from /server list; omit to use the channel or your selected server',
+    required: false,
+    max_length: 32,
+  };
+  if (json.options?.some((o) => o.type === ApplicationCommandOptionType.Subcommand)) {
+    for (const sub of json.options)
+      if (sub.type === ApplicationCommandOptionType.Subcommand)
+        sub.options = [...(sub.options || []), option];
+  } else json.options = [...(json.options || []), option];
+  return json;
+});
