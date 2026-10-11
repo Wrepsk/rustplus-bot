@@ -16,6 +16,8 @@ Friends need only Discord, their normal browser and Rust. `/pair start` opens a 
 
 The loopback flow is documented in [RustPlusApi's credential guide](https://github.com/HandyS11/RustPlusApi/blob/develop/docs/articles/credentials.md). Registration uses the installed rustplus.js 2.5.0 CLI's FCM/Expo/companion protocol. This is unofficial and still needs a real Steam/Rust smoke test in your environment; if Facepunch changes the redirect behavior, the desktop helper remains available.
 
+**Redirected to `https://rust.facepunch.com/companion` after signing in?** That is the official app page, not a completed pairing. No usable token has reached this website. On the pairing page, expand **Sent to the official Rust+ app page instead?**, copy this attempt's exact sign-in link, and open it once in a fresh Chrome tab. Complete the official warning yourself. If the same redirect happens again, use the desktop helper with the code now shown in `/pair start` (or under the website's troubleshooting section). Ask the owner for the helper ZIP if no download button is configured. Do not change DNS, disable browser security in your normal browser, or paste raw tokens into support messages. The authenticated redirect could not be verified locally; successful mocked registration does not verify Facepunch's live login behavior.
+
 Owner setup, once (existing domain + HTTPS required):
 
 1. Back up your data volume. Put the updated code on the VPS and keep your existing working Docker security/execution settings.

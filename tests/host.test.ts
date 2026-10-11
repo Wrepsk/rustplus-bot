@@ -182,6 +182,11 @@ describe('interactive pairing and management panels', () => {
     expect(output(start)).toContain('https://pair.example.org/#code=');
     expect(output(start)).not.toContain('npm');
     expect(output(start)).not.toContain('RustPlus Pairing.cmd');
+    expect(output(start)).toContain('Paste this code into the helper');
+    const codes = output(start).match(/[a-f0-9]{32}\.[A-Za-z0-9_-]+/g)!;
+    expect(codes.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(codes).size).toBe(1);
+    expect(host.pairing.isChallengeActive(codes[0])).toBe(true);
   });
   it('paginates private inboxes within Discord limits and opens a naming modal', async () => {
     for (let i = 0; i < 6; i++)

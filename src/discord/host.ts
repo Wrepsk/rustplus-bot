@@ -323,7 +323,8 @@ export class DiscordHost {
             embeds: [
               card(
                 '🔗 Link your Rust+ account',
-                '1. Open the pairing website below.\n2. Sign in on the official Facepunch / Steam page.\n3. After login, copy the **localhost address** back into the website, as explained there.\n4. Copy its encrypted command and paste it into Discord.\n\nYour link expires in **15 minutes**. No app or project download is needed. After importing, wait for `/pair status` to show **listening**, pair in-game and open `/pair inbox`.',
+                '1. Open the pairing website below.\n2. Sign in on the official Facepunch / Steam page.\n3. After login, copy the **localhost address** back into the website, as explained there.\n4. Copy its encrypted command and paste it into Discord.\n\nYour link expires in **15 minutes**. Browser pairing needs no installation. After importing, wait for `/pair status` to show **listening**, pair in-game and open `/pair inbox`.\n\nIf Facepunch redirects to the official app page, reopen the exact sign-in link once. If it persists, use the **Desktop helper fallback** below or ask the owner for the helper ZIP. Paste this code into the helper:\n' +
+                  `\`\`\`\n${code}\n\`\`\``,
               ),
             ],
             components: [

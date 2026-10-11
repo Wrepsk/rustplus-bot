@@ -17,6 +17,11 @@ export const page = String.raw`<!doctype html>
 <section id="login" hidden><h2>Sign in on Facepunch</h2><p>Open the official Rust companion login page below. Read its warning, continue to Steam, and finish signing in there.</p>
 <div class="notice"><strong>A “can’t connect” page is expected afterward.</strong><p>The login result returns to a <code>localhost</code> address. Nothing needs to run on your PC. Copy the <strong>entire address bar</strong> from that page and paste it below.</p></div>
 <a id="steam" class="button" target="_blank" rel="noopener noreferrer">Open Steam sign-in <span aria-hidden="true">↗</span></a>
+<details><summary>Sent to the official Rust+ app page instead?</summary><p>That page is not a successful pairing result. Facepunch did not return a token to this login attempt. Reopen the exact sign-in link once; do not use the official app download link.</p>
+<label for="login-link">This attempt’s sign-in link</label><input id="login-link" readonly spellcheck="false"><button id="copy-login" class="secondary">Copy sign-in link</button>
+<p>If it still redirects there, browser pairing is unavailable for this attempt. Use the Windows desktop helper from <code>/pair start</code>, or ask the bot owner for its ZIP. Extract it, open <strong>RustPlus Pairing.cmd</strong>, and paste the code below. The helper uses a separate login method. No DNS or Nginx changes are needed.</p>
+<label for="helper-code">Discord code for the desktop helper</label><input id="helper-code" readonly spellcheck="false"><button id="copy-helper" class="secondary">Copy helper code</button>
+<p>The same 15-minute expiry applies. If expired, run <code>/pair start</code> again. Never paste Steam passwords or a raw login address into Discord.</p></details>
 <label for="address">Address after Steam sign-in</label><textarea id="address" rows="3" autocomplete="off" spellcheck="false" placeholder="http://localhost:…/callback/…?steamId=…&amp;token=…"></textarea>
 <p class="hint">This address contains a private Rust+ token. Paste it only here, never into Discord or a message.</p>
 <button id="finish">Create Discord command <span aria-hidden="true">→</span></button></section>
@@ -52,12 +57,20 @@ $('prepare').addEventListener('click', async () => {
   try {
     const data = await post('/api/start', { code: $('code').value.trim() });
     csrf = data.csrf; $('steam').href = data.loginUrl;
+    $('login-link').value = data.loginUrl; $('helper-code').value = $('code').value.trim();
     $('begin').hidden = true; $('login').hidden = false; $('done').hidden = true;
     $('restart').hidden = true; status(''); step(2);
   } catch (error) { status(error instanceof Error ? error.message : 'Connection failed.', true); }
   finally { $('prepare').disabled = false; }
 });
 $('steam').addEventListener('click', () => step(3));
+for (const [button, field, message] of [
+  ['copy-login', 'login-link', 'Sign-in link copied. Open it in a new Chrome tab and complete Facepunch’s warning yourself.'],
+  ['copy-helper', 'helper-code', 'Code copied. Paste it into the desktop pairing helper.'],
+]) $(button).addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText($(field).value); status(message); }
+  catch { $(field).focus(); $(field).select(); status('Copy the selected text manually.'); }
+});
 $('finish').addEventListener('click', async () => {
   $('finish').disabled = true; $('restart').hidden = true; status('Registering Rust+ pairing. This can take up to a minute…');
   const address = $('address').value.trim(); $('address').value = '';

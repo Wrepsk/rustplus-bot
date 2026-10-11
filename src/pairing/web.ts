@@ -35,6 +35,11 @@ export function parseSteamReturn(address: string, expected: string): string {
   } catch {
     throw new WebError(400, 'Paste the complete localhost address from the Steam login tab.');
   }
+  if (url.origin === 'https://rust.facepunch.com' && /^\/companion\/?$/.test(url.pathname))
+    throw new WebError(
+      400,
+      'Facepunch redirected to the official app page without returning a Rust+ token. Reopen the exact Steam sign-in link from this pairing page once. If it happens again, use the desktop helper with your Discord pairing code. Changing DNS or Nginx will not fix this login handoff.',
+    );
   const callback = new URL(expected);
   if (
     url.origin !== callback.origin ||

@@ -135,6 +135,33 @@ describe('self-hosted browser pairing', () => {
       ).toBe(400);
     expect(register).not.toHaveBeenCalled();
   });
+  it('explains an official app redirect without consuming registration attempts or leaking input', async () => {
+    const session = await start();
+    const response = await post(
+      '/api/complete',
+      {
+        address: `https://rust.facepunch.com/companion?private=${token}`,
+        csrf: session.csrf,
+      },
+      session.cookie,
+    );
+    expect(response.status).toBe(400);
+    const body = await response.text();
+    expect(body).toContain('without returning a Rust+ token');
+    expect(body).toContain('desktop helper');
+    expect(body).not.toContain(token);
+    expect(register).not.toHaveBeenCalled();
+    // The user can still finish the same session with a genuine callback.
+    expect(
+      (
+        await post(
+          '/api/complete',
+          { address: session.address, csrf: session.csrf },
+          session.cookie,
+        )
+      ).status,
+    ).toBe(200);
+  });
   it('deduplicates double submission and retries after a lost response', async () => {
     let finish!: (value: typeof credentials) => void;
     register.mockImplementation(
