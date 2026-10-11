@@ -101,17 +101,21 @@ Enabled profiles run simultaneously, each with independent devices, subscription
 
 ```text
 /server list
-/server use id:<server-id>
-/settings alerts channel:#second-alerts server:<server-id>
-/chat setup channel:#second-chat server:<server-id>
-/panel server:<server-id>
+/server use
+/settings alerts channel:#second-alerts
+/chat setup channel:#second-chat
+/panel
 ```
 
-Configure operator roles per server with `/settings role-add role:@Operators server:<id>`. Commands accept an optional `server` ID. Otherwise a dedicated chat/panel channel selects its server; elsewhere your personal, persistent `/server use` selection applies. Panel buttons always target the server belonging to their saved message. Use distinct panel channels. **Alert channels may be shared:** run `/settings alerts channel:#alerts server:<id>` for each server; notification footers identify the server.
+With multiple saved servers, server-specific slash commands open a **private server dropdown** when you omit `server`. Choose by name; the command then runs with the channel, device ID, role and other options you already entered. Nothing runs before selection. This includes `/panel`, `/device`, `/alarm`, `/chat`, `/settings`, `/status`, `/ping`, `/pair status`, and `/server use|pause|resume`. `/server use` no longer requires an ID. With one saved server, commands run directly. Explicit `server:<id>` and `/server use id:<id>` still skip the picker. Global help, server listing and pairing sign-in/inbox/unlink continue to open directly; accepted pairings identify their server from the notification.
 
-Each chat channel belongs to one server at a time. Administrator `/chat setup channel:#rust-chat server:<new-server-id>` **transfers** an occupied channel to that server, disables the previous bridge and clears its channel assignment. Pending old-bridge sends are invalidated; a request already sent to Rust cannot be recalled. Use the explicit `server` option when transferring an occupied channel, because its existing assignment otherwise selects the previous server. Run `/chat setup` again to give the previous server a different channel before enabling it.
+Selections belong to their initiating member, expire after five minutes and can be cancelled. The bot checks current permissions before showing choices and again before execution; duplicate submissions cannot execute a command twice. Up to five prompts per member and 200 total are retained in memory; pending selections expire on bot restart, so rerun the command. Choosing a server for a command does not change your saved `/server use` default.
 
-`/server pause server:<id>` and `/server resume server:<id>` affect only that server. Fresh pairing by an administrator for the existing monitoring Steam identity refreshes its token without replacing devices. A friend's pairing links personal chat and does not replace the monitoring account. Use these commands to switch servers instead of changing the original environment variables. Up to 10 server profiles and 50 paired users are supported.
+Configure operator roles per server with `/settings role-add role:@Operators`, then choose the server. Panel buttons always target the server belonging to their saved message, and ordinary chat messages still route through the configured channel. Use distinct panel channels. **Alert channels may be shared:** run `/settings alerts channel:#alerts` and select each server in turn; notification footers identify the server.
+
+Each chat channel belongs to one server at a time. Administrator `/chat setup channel:#rust-chat` **transfers** an occupied channel to the server you select, disables the previous bridge and clears its channel assignment. Pending old-bridge sends are invalidated; a request already sent to Rust cannot be recalled. The picker appears even when you invoke the command in another server's chat channel. Run `/chat setup` again to give the previous server a different channel before enabling it.
+
+`/server pause` and `/server resume` affect only the server you select; paused servers remain available in the picker. Fresh pairing by an administrator for the existing monitoring Steam identity refreshes its token without replacing devices. A friend's pairing links personal chat and does not replace the monitoring account. Use these commands to switch servers instead of changing the original environment variables. Up to 10 server profiles and 50 paired users are supported.
 
 Every chat author needs their **own Rust+ server pairing**, not just Steam OpenID or a Steam ID. Messages use their player ID/token and retain the `[Discord] DisplayName:` prefix. Personal connections open on demand, reuse existing sockets, and close after 60 seconds idle. At most three additional personal connections per server run alongside monitoring, below the upstream documented default of five per source IP/server, assuming no other automation or alternate-hostname profiles share that endpoint. Stricter server limits may require fewer active users. Uncertain sends are not retried automatically; rejected personal credentials pause until a new pairing. `/pair unlink` removes your listener and personal chat credentials across servers; shared monitoring remains configured. An explicitly unlinked administrator is not automatically relinked on restart.
 

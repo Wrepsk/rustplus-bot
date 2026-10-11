@@ -51,6 +51,11 @@ interface Confirmation {
   expires: number;
   name: string;
 }
+export type CommandInput = Pick<
+  ChatInputCommandInteraction,
+  'commandName' | 'options' | 'channelId'
+>;
+
 export class Bot {
   readonly client: Client;
   static createClient(): Client {
@@ -175,6 +180,20 @@ export class Bot {
   dispatch(interaction: Interaction): void {
     if (!this.stopping) this.track(this.interaction(interaction), 'interaction');
   }
+  async executeSelectedCommand(
+    input: CommandInput,
+    response: StringSelectMenuInteraction,
+  ): Promise<void> {
+    try {
+      if (this.stopping) throw new UserError('Bot is shutting down.');
+      await this.command(
+        { ...input, editReply: (payload) => response.editReply(payload) },
+        await this.principal(response),
+      );
+    } catch (error) {
+      await this.fail(response, error);
+    }
+  }
   private async principal(
     interaction:
       | ChatInputCommandInteraction
@@ -233,27 +252,37 @@ export class Bot {
       }
       await this.command(interaction, principal);
     } catch (error) {
-      const safe =
-        error instanceof RustFailure ||
-        error instanceof UserError ||
-        error instanceof ManagementError ||
-        error instanceof AlertDeliveryError
-          ? error.message
-          : 'The request failed. Check configuration, channel permissions and logs, then retry.';
-      log.warn(
-        {
-          code: errorCode(error),
-          operation: interaction.isChatInputCommand() ? interaction.commandName : 'component',
-        },
-        'Discord operation failed',
-      );
-      if (interaction.deferred || interaction.replied)
-        await interaction.editReply({
-          embeds: [this.embed('Request failed', safe)],
-          components: [],
-        });
-      else await interaction.reply({ content: safe, flags: MessageFlags.Ephemeral });
+      await this.fail(interaction, error);
     }
+  }
+  private async fail(
+    interaction:
+      | ChatInputCommandInteraction
+      | ButtonInteraction
+      | ModalSubmitInteraction
+      | StringSelectMenuInteraction,
+    error: unknown,
+  ): Promise<void> {
+    const safe =
+      error instanceof RustFailure ||
+      error instanceof UserError ||
+      error instanceof ManagementError ||
+      error instanceof AlertDeliveryError
+        ? error.message
+        : 'The request failed. Check configuration, channel permissions and logs, then retry.';
+    log.warn(
+      {
+        code: errorCode(error),
+        operation: interaction.isChatInputCommand() ? interaction.commandName : 'component',
+      },
+      'Discord operation failed',
+    );
+    if (interaction.deferred || interaction.replied)
+      await interaction.editReply({
+        embeds: [this.embed('Request failed', safe)],
+        components: [],
+      });
+    else await interaction.reply({ content: safe, flags: MessageFlags.Ephemeral });
   }
   private requireAdmin(principal: Principal): void {
     if (!this.permissions.admin(principal))
@@ -358,7 +387,7 @@ export class Bot {
     });
   }
   private async command(
-    interaction: ChatInputCommandInteraction,
+    interaction: CommandInput & Pick<ChatInputCommandInteraction, 'editReply'>,
     principal: Principal,
   ): Promise<void> {
     const name = interaction.commandName,
@@ -530,7 +559,7 @@ export class Bot {
     }
     await reply(
       'Rust+ bot commands',
-      '`/panel` — Create or refresh base controls (admin)\n`/device add|remove|rename|list|status` — Manage paired devices (admin)\n`/alarm list|enable|disable|test` — Smart Alarm notifications (admin)\n`/chat setup|enable|disable|status` — Team chat synchronization\n`/settings role-add|role-remove|roles|alerts` — Configure access and alerts (admin)\n`/server list|use|pause|resume` — Manage saved Rust servers\n`/pair start|import|inbox|accept|status|unlink` — Pair servers, devices and personal chat accounts\n`/status` — Connection, server and device information\n`/ping` — Latency\n`/help` — This guide\n\nUse the optional server argument to select a server. Switch buttons and Discord-to-Rust chat require an operator role or administrator access. Personal Rust+ linking is required for chat. Switch power does not indicate physical door position.',
+      '`/panel` — Create or refresh base controls (admin)\n`/device add|remove|rename|list|status` — Manage paired devices (admin)\n`/alarm list|enable|disable|test` — Smart Alarm notifications (admin)\n`/chat setup|enable|disable|status` — Team chat synchronization\n`/settings role-add|role-remove|roles|alerts` — Configure access and alerts (admin)\n`/server list|use|pause|resume` — Manage saved Rust servers\n`/pair start|import|inbox|accept|status|unlink` — Pair servers, devices and personal chat accounts\n`/status` — Connection, server and device information\n`/ping` — Latency\n`/help` — This guide\n\nWith multiple saved servers, omit the server argument to choose by name from a private menu. /server use also works without an ID. Switch buttons and Discord-to-Rust chat require an operator role or administrator access. Personal Rust+ linking is required for chat. Switch power does not indicate physical door position.',
     );
   }
   async stop(updatePanel = false): Promise<void> {

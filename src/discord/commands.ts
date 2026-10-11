@@ -13,7 +13,7 @@ export const commands = [
         .setName('use')
         .setDescription('Select the server for your commands')
         .addStringOption((o) =>
-          o.setName('id').setDescription('Server ID from /server list').setRequired(true),
+          o.setName('id').setDescription('Optional server ID; omit to choose from a menu'),
         ),
     )
     .addSubcommand((s) =>
@@ -242,7 +242,7 @@ export const commands = [
   const option = {
     type: ApplicationCommandOptionType.String as const,
     name: 'server',
-    description: 'Server ID from /server list; omit to use the channel or your selected server',
+    description: 'Optional server ID; omit to choose from a server menu',
     required: false,
     max_length: 32,
   };

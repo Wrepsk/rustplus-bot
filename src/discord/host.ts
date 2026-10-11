@@ -14,9 +14,10 @@ import {
   type ModalSubmitInteraction,
   type StringSelectMenuInteraction,
 } from 'discord.js';
+import { randomBytes } from 'node:crypto';
 import type { Config } from '../config';
 import { Permissions, type Principal } from '../permissions';
-import { Bot, UserError } from './bot';
+import { Bot, UserError, type CommandInput } from './bot';
 import { commands } from './commands';
 import { Servers } from '../servers';
 import { Connection, RustFailure } from '../rust/connection';
@@ -24,7 +25,15 @@ import { ChatIdentities } from '../chat-identities';
 import { PairingService } from '../pairing/service';
 import { log, errorCode } from '../log';
 import { PairingWeb } from '../pairing/web';
-import { button, card, inboxView, pairingModal, pairingStatus, serversView } from './ui';
+import {
+  button,
+  card,
+  inboxView,
+  pairingModal,
+  pairingStatus,
+  serversView,
+  commandServerPicker,
+} from './ui';
 import type { DeathPush } from '../pairing/schema';
 
 type HostComponent = ButtonInteraction | ModalSubmitInteraction | StringSelectMenuInteraction;
@@ -33,6 +42,13 @@ interface ServerSession {
   bot: Bot;
   rust: Connection;
   identities: ChatIdentities;
+}
+interface PendingCommand {
+  input: CommandInput;
+  owner: string;
+  guildId: string;
+  serverIds: string[];
+  expires: number;
 }
 export class DiscordHost {
   readonly client: Client = Bot.createClient();
@@ -43,6 +59,7 @@ export class DiscordHost {
   private lifecycle: Promise<unknown> = Promise.resolve();
   private stopping = false;
   private queued = 0;
+  private pendingCommands = new Map<string, PendingCommand>();
   constructor(
     private config: Config,
     readonly servers: Servers,
@@ -214,6 +231,198 @@ export class DiscordHost {
         admin ? 'Administrator access is required.' : 'An allowed operator role is required.',
       );
   }
+  private commandAccess(input: CommandInput): 'admin' | 'operator' | 'member' {
+    const name = input.commandName;
+    if (['panel', 'device', 'alarm', 'settings'].includes(name)) return 'admin';
+    if (name === 'chat' && input.options.getSubcommand() !== 'status') return 'admin';
+    if (name === 'server') return input.options.getSubcommand() === 'use' ? 'operator' : 'admin';
+    return name === 'pair' ? 'operator' : 'member';
+  }
+  private checkCommandAccess(input: CommandInput, id: string, principal: Principal): void {
+    const access = this.commandAccess(input);
+    if (access !== 'member') this.permissions(id, principal, access === 'admin');
+  }
+  private needsServerPicker(interaction: ChatInputCommandInteraction): boolean {
+    if (interaction.options.getString('server') || this.servers.list().length < 2) return false;
+    const name = interaction.commandName;
+    if (name === 'server')
+      return (
+        ['use', 'pause', 'resume'].includes(interaction.options.getSubcommand()) &&
+        !interaction.options.getString('id')
+      );
+    if (name === 'pair') return interaction.options.getSubcommand() === 'status';
+    return ['panel', 'device', 'alarm', 'chat', 'settings', 'status', 'ping'].includes(name);
+  }
+  private async showServerPicker(interaction: ChatInputCommandInteraction): Promise<void> {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const principal = await this.principal(interaction);
+    const input: CommandInput = {
+      commandName: interaction.commandName,
+      options: interaction.options,
+      channelId: interaction.channelId,
+    };
+    const profiles = this.servers.list().filter((profile) => {
+      try {
+        this.checkCommandAccess(input, profile.id, principal);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    if (!profiles.length)
+      throw new HostError(
+        this.commandAccess(input) === 'admin'
+          ? 'Administrator access is required.'
+          : 'An allowed operator role is required.',
+      );
+    for (const [key, pending] of this.pendingCommands)
+      if (pending.expires <= Date.now()) this.pendingCommands.delete(key);
+    if (this.pendingCommands.size >= 200)
+      throw new HostError('Too many pending server selections. Try again in a few minutes.');
+    if ([...this.pendingCommands.values()].filter((p) => p.owner === principal.id).length >= 5)
+      throw new HostError(
+        'Finish or cancel your previous server selections first. They expire after five minutes.',
+      );
+    const token = randomBytes(12).toString('hex');
+    this.pendingCommands.set(token, {
+      input,
+      owner: principal.id,
+      guildId: this.config.DISCORD_GUILD_ID,
+      serverIds: profiles.map((p) => p.id),
+      expires: Date.now() + 5 * 60000,
+    });
+    try {
+      const sub = interaction.options.getSubcommand(false);
+      await interaction.editReply(
+        commandServerPicker(token, profiles, `/${input.commandName}${sub ? ` ${sub}` : ''}`),
+      );
+    } catch (error) {
+      this.pendingCommands.delete(token);
+      throw error;
+    }
+  }
+  private sessionForCommand(input: CommandInput, id: string): ServerSession {
+    if (
+      input.commandName === 'panel' &&
+      this.servers
+        .list()
+        .some(
+          (p) =>
+            p.id !== id &&
+            this.servers.store(p.id).get<{ channelId: string } | null>('panel', null)?.channelId ===
+              input.channelId,
+        )
+    )
+      throw new HostError('Each Rust server needs a different Discord panel channel.');
+    const session = this.sessions.get(id);
+    if (!session) throw new HostError('Server is paused. Use /server resume.');
+    return session;
+  }
+  private async selectCommandServer(
+    interaction: StringSelectMenuInteraction | ButtonInteraction,
+  ): Promise<void> {
+    try {
+      const [prefix, token] = interaction.customId.split(':');
+      const pending = this.pendingCommands.get(token);
+      if (!pending || pending.expires <= Date.now()) {
+        this.pendingCommands.delete(token);
+        throw new HostError(
+          'This selection expired or was already used. Run the slash command again.',
+        );
+      }
+      if (pending.owner !== interaction.user.id || pending.guildId !== interaction.guildId)
+        throw new HostError(
+          'This private selection belongs to another Discord member. Run your own command.',
+        );
+      const id =
+        interaction.isStringSelectMenu() && interaction.values.length === 1
+          ? interaction.values[0]
+          : '';
+      if (prefix !== 'command-cancel' && !pending.serverIds.includes(id))
+        throw new HostError('Choose one of the servers in this menu.');
+      this.pendingCommands.delete(token); // Consume before any await: double submissions cannot execute twice.
+      await interaction.deferUpdate();
+      await interaction.editReply({
+        embeds: [
+          card('Running command…', 'Checking access and applying your saved command options.'),
+        ],
+        components: [],
+      });
+      if (prefix === 'command-cancel') {
+        await interaction.editReply({
+          embeds: [card('Command cancelled', 'No changes were made.')],
+          components: [],
+        });
+        return;
+      }
+      const principal = await this.principal(interaction);
+      this.checkCommandAccess(pending.input, id, principal);
+      if (pending.input.commandName === 'server')
+        await this.serverAction(pending.input, interaction, id, principal);
+      else if (pending.input.commandName === 'pair')
+        await interaction.editReply(pairingStatus(this.pairing, this.servers, id, principal.id));
+      else if (interaction.isStringSelectMenu())
+        await this.sessionForCommand(pending.input, id).bot.executeSelectedCommand(
+          pending.input,
+          interaction,
+        );
+    } catch (error) {
+      log.warn({ code: errorCode(error) }, 'Server selection failed');
+      const content =
+        error instanceof UserError || error instanceof RustFailure
+          ? error.message
+          : 'The command failed. Run it again and check permissions and logs.';
+      if (interaction.deferred || interaction.replied)
+        await interaction.editReply({
+          embeds: [card('Request failed', content)],
+          components: [],
+          allowedMentions: { parse: [] },
+        });
+      else
+        await interaction.reply({
+          content,
+          flags: MessageFlags.Ephemeral,
+          allowedMentions: { parse: [] },
+        });
+    }
+  }
+  private async serverAction(
+    input: CommandInput,
+    response: Pick<ChatInputCommandInteraction, 'editReply'>,
+    id: string,
+    principal: Principal,
+  ): Promise<void> {
+    const sub = input.options.getSubcommand();
+    this.permissions(id, principal, sub !== 'use');
+    if (sub === 'use') {
+      this.servers.select(principal.id, id);
+      await response.editReply({
+        embeds: [
+          card(
+            'Server selected',
+            `**${escapeMarkdown(this.servers.get(id).name)}**\nDefault saved. Server-specific slash commands still let you choose before running. Other servers keep running.`,
+          ),
+        ],
+        components: [],
+        allowedMentions: { parse: [] },
+      });
+    } else {
+      await this.serialize(async () => {
+        this.servers.enable(id, sub === 'resume');
+        await this.restart(id);
+      });
+      await response.editReply({
+        embeds: [
+          card(
+            'Server updated',
+            `**${escapeMarkdown(this.servers.get(id).name)}**: ${sub === 'resume' ? 'connecting' : 'paused'}.`,
+          ),
+        ],
+        components: [],
+        allowedMentions: { parse: [] },
+      });
+    }
+  }
   private async reply(
     interaction: ChatInputCommandInteraction,
     title: string,
@@ -236,6 +445,14 @@ export class DiscordHost {
     });
   }
   private async interaction(interaction: Interaction): Promise<void> {
+    if (
+      (interaction.isStringSelectMenu?.() || interaction.isButton()) &&
+      (interaction.customId.startsWith('command-server:') ||
+        interaction.customId.startsWith('command-cancel:'))
+    ) {
+      await this.selectCommandServer(interaction);
+      return;
+    }
     if (
       (interaction.isButton() ||
         interaction.isModalSubmit?.() ||
@@ -276,23 +493,13 @@ export class DiscordHost {
     try {
       if (interaction.guildId !== this.config.DISCORD_GUILD_ID)
         throw new HostError('Wrong Discord server.');
+      if (this.needsServerPicker(interaction)) {
+        await this.showServerPicker(interaction);
+        return;
+      }
       const id = this.selected(interaction);
       if (!['server', 'pair'].includes(interaction.commandName)) {
-        if (
-          interaction.commandName === 'panel' &&
-          this.servers
-            .list()
-            .some(
-              (p) =>
-                p.id !== id &&
-                this.servers.store(p.id).get<{ channelId: string } | null>('panel', null)
-                  ?.channelId === interaction.channelId,
-            )
-        )
-          throw new HostError('Each Rust server needs a different Discord panel channel.');
-        const session = this.sessions.get(id);
-        if (!session) throw new HostError('Server is paused. Use /server resume.');
-        session.bot.dispatch(interaction);
+        this.sessionForCommand(interaction, id).bot.dispatch(interaction);
         return;
       }
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -314,25 +521,12 @@ export class DiscordHost {
       if (interaction.commandName === 'server') {
         if (sub === 'list') {
           await interaction.editReply(this.serverView(principal.id));
-        } else if (sub === 'use') {
-          const target = interaction.options.getString('id', true);
-          this.permissions(target, principal);
-          this.servers.select(principal.id, target);
-          await this.reply(
-            interaction,
-            'Server selected',
-            `**${escapeMarkdown(this.servers.get(target).name)}**\nThis is now your default outside server-specific channels. Other servers keep running.`,
-          );
         } else {
-          this.permissions(id, principal, true);
-          await this.serialize(async () => {
-            this.servers.enable(id, sub === 'resume');
-            await this.restart(id);
-          });
-          await this.reply(
+          await this.serverAction(
             interaction,
-            'Server updated',
-            `**${escapeMarkdown(this.servers.get(id).name)}**: ${sub === 'resume' ? 'connecting' : 'paused'}.`,
+            interaction,
+            sub === 'use' ? interaction.options.getString('id') || id : id,
+            principal,
           );
         }
         return;
@@ -621,7 +815,7 @@ export class DiscordHost {
         this.pairing.acknowledge(principal.id, pendingId);
         return {
           title: 'Server pairing saved',
-          description: `**${escapeMarkdown(profile.name)}** • \`${profile.id}\`\nYour personal Steam identity is linked for this server. Chat verifies team membership before sending. For a new server, configure its own /settings alerts, /chat setup and /panel using the optional server argument.`,
+          description: `**${escapeMarkdown(profile.name)}** • \`${profile.id}\`\nYour personal Steam identity is linked for this server. Chat verifies team membership before sending. For a new server, run /settings alerts, /chat setup and /panel, then choose its name in the server menu.`,
         };
       } else {
         if (!profile)
@@ -671,6 +865,7 @@ export class DiscordHost {
   }
   async stop(): Promise<void> {
     this.stopping = true;
+    this.pendingCommands.clear();
     await this.web?.stop();
     this.pairing.stop();
     for (const { identities } of this.sessions.values()) identities.stop();

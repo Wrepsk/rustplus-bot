@@ -11,6 +11,9 @@ import type { Config } from '../src/config';
 import { PairingListener } from '../src/pairing/listener';
 import { encryptPairing } from '../src/pairing/crypto';
 import { PlayerActivity } from '../src/activity';
+import { Panel } from '../src/discord/panel';
+import { Alerts, AlertDeliveryError } from '../src/discord/alerts';
+import { commands } from '../src/discord/commands';
 
 let directory: string, store: Store, servers: Servers, host: DiscordHost, second: string;
 let config: Config;
@@ -94,6 +97,7 @@ function command(
       getSubcommand: () => sub,
       getString: (key: string) => values[key] || null,
       getBoolean: () => null,
+      getInteger: () => null,
       getChannel: (key: string) => ({ id: values[key] || '' }),
       getRole: () => null,
     },
@@ -354,6 +358,200 @@ describe('interactive pairing and management panels', () => {
     emit(revoke);
     await vi.waitFor(() => expect(revoke.editReply).toHaveBeenCalled());
     expect(servers.identity(second, 'friend')).toBeUndefined();
+  });
+});
+
+describe('slash-command server picker', () => {
+  async function picker(request: ReturnType<typeof command>) {
+    emit(request);
+    await vi.waitFor(() => expect(output(request)).toContain('command-server:'));
+    return output(request).match(/command-server:[a-f0-9]+/)![0];
+  }
+  it("keeps chat options and waits for an explicit choice even in another server's channel", async () => {
+    store.set('chatEnabled', true);
+    const request = command('chat', 'setup', { channel: 'main-chat' }, 'owner', 'main-chat');
+    const id = await picker(request);
+    expect(output(request)).toContain('Main');
+    expect(output(request)).toContain('Second');
+    expect(request.deferReply).toHaveBeenCalledWith({ flags: 64 });
+    expect(servers.store(second).get('chatChannel', '')).toBe('second-chat');
+    const select = component(id, 'owner', 'select', { selected: second });
+    emit(select);
+    await vi.waitFor(() => expect(output(select)).toContain('Team chat'));
+    expect(servers.store(second).get('chatChannel', '')).toBe('main-chat');
+    expect(store.get('chatChannel', '')).toBe('');
+    expect(store.get('chatEnabled', true)).toBe(false);
+    expect(servers.selected('owner')).toBe('default'); // A command choice does not change the user's default.
+    expect(request.deferReply).toHaveBeenCalledOnce();
+    expect(select.deferUpdate).toHaveBeenCalledOnce();
+  });
+  it('supports settings, devices, alarms, panels and status through the existing handlers', async () => {
+    servers.store(second).add({ id: '77', type: 'alarm', name: 'Outer wall' });
+    const panel = vi.spyOn(Panel.prototype, 'create').mockResolvedValue(undefined);
+    const simulated = vi.spyOn(Alerts.prototype, 'send').mockResolvedValue(undefined);
+    const cases: [string, string, Record<string, string>][] = [
+      ['settings', 'alerts', { channel: 'shared-alerts' }],
+      ['device', 'rename', { id: '42', name: 'Workshop' }],
+      ['alarm', 'disable', { id: '77' }],
+      ['alarm', 'test', { id: '77' }],
+      ['device', 'list', {}],
+      ['panel', '', {}],
+      ['status', '', {}],
+      ['ping', '', {}],
+      ['pair', 'status', {}],
+    ];
+    for (const [name, sub, values] of cases) {
+      const id = await picker(command(name, sub, values));
+      const select = component(id, 'owner', 'select', { selected: second });
+      emit(select);
+      await vi.waitFor(() => expect(select.editReply.mock.calls.length).toBeGreaterThan(1));
+      expect(output(select)).not.toContain('Request failed');
+      expect(output(select)).not.toContain('request failed');
+    }
+    expect(servers.store(second).get('alertChannel', '')).toBe('shared-alerts');
+    expect(store.get('alertChannel', '')).toBe('');
+    expect(servers.store(second).device('42').name).toBe('Workshop');
+    expect(store.device('42').name).toBe('Main lights');
+    expect(servers.store(second).device('77').enabled).toBe(false);
+    expect(panel).toHaveBeenCalledWith('general');
+    expect(simulated).toHaveBeenCalledWith(expect.objectContaining({ id: '77' }), true);
+  });
+  it('lets /server use, pause and resume work without typing an ID, including paused servers', async () => {
+    const use = component(await picker(command('server', 'use')), 'owner', 'select', {
+      selected: second,
+    });
+    emit(use);
+    await vi.waitFor(() => expect(output(use)).toContain('Server selected'));
+    expect(servers.selected('owner')).toBe(second);
+    const pause = component(await picker(command('server', 'pause')), 'owner', 'select', {
+      selected: second,
+    });
+    emit(pause);
+    await vi.waitFor(() => expect(output(pause)).toContain('Server updated'));
+    expect(servers.get(second).enabled).toBe(false);
+    const resumeRequest = command('server', 'resume');
+    const resume = component(await picker(resumeRequest), 'owner', 'select', { selected: second });
+    expect(output(resumeRequest)).toContain('Paused');
+    emit(resume);
+    await vi.waitFor(() => expect(output(resume)).toContain('Server updated'));
+    expect(servers.get(second).enabled).toBe(true);
+    expect(servers.get('default').enabled).toBe(true);
+    const useCommand = commands.find((c) => c.name === 'server')!;
+    expect(JSON.stringify(useCommand)).not.toContain('"required":true');
+  });
+  it("rejects other users, another guild and forged choices without consuming the owner's selection", async () => {
+    const id = await picker(command('settings', 'alerts', { channel: 'alerts' }));
+    const wrongUser = component(id, 'friend', 'select', { selected: second });
+    emit(wrongUser);
+    await vi.waitFor(() => expect(wrongUser.reply).toHaveBeenCalled());
+    const wrongGuild = component(id, 'owner', 'select', { selected: second });
+    wrongGuild.guildId = 'other-guild';
+    emit(wrongGuild);
+    await vi.waitFor(() => expect(wrongGuild.reply).toHaveBeenCalled());
+    const forged = component(id, 'owner', 'select', { selected: 'not-a-server' });
+    emit(forged);
+    await vi.waitFor(() => expect(forged.reply).toHaveBeenCalled());
+    expect(servers.store(second).get('alertChannel', '')).toBe('');
+    const valid = component(id, 'owner', 'select', { selected: second });
+    emit(valid);
+    await vi.waitFor(() => expect(output(valid)).toContain('Alerts configured'));
+  });
+  it('rechecks permissions after selection and filters operator choices per server', async () => {
+    servers.store(second).set('allowedRoles', ['other-role']);
+    const request = command('server', 'use', {}, 'friend');
+    const id = await picker(request);
+    expect(output(request)).toContain('Main');
+    expect(output(request)).not.toContain('Second');
+    role = [];
+    const revoked = component(id, 'friend', 'select', { selected: 'default' });
+    emit(revoked);
+    await vi.waitFor(() => expect(output(revoked)).toContain('operator role'));
+    const denied = command('settings', 'alerts', { channel: 'alerts' }, 'friend');
+    emit(denied);
+    await vi.waitFor(() => expect(output(denied)).toContain('Administrator'));
+    expect(output(denied)).not.toContain('command-server:');
+    const adminId = await picker(command('chat', 'setup', { channel: 'alerts' }));
+    config.ADMIN_USER_ID = 'different-admin';
+    const lostAdmin = component(adminId, 'owner', 'select', { selected: second });
+    emit(lostAdmin);
+    await vi.waitFor(() => expect(output(lostAdmin)).toContain('Administrator'));
+    expect(servers.store(second).get('chatChannel', '')).toBe('second-chat');
+  });
+  it('consumes a selection once, supports cancellation and rejects expired or restarted prompts', async () => {
+    const simulated = vi.spyOn(Alerts.prototype, 'send').mockResolvedValue(undefined);
+    servers.store(second).add({ id: '77', type: 'alarm', name: 'Outer wall' });
+    const id = await picker(command('alarm', 'test', { id: '77' }));
+    const first = component(id, 'owner', 'select', { selected: second });
+    const duplicate = component(id, 'owner', 'select', { selected: second });
+    emit(first);
+    emit(duplicate);
+    await vi.waitFor(() => expect(simulated).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(duplicate.reply).toHaveBeenCalled());
+    const cancelId = await picker(command('settings', 'alerts', { channel: 'alerts' }));
+    const cancel = component(cancelId.replace('command-server:', 'command-cancel:'));
+    emit(cancel);
+    await vi.waitFor(() => expect(output(cancel)).toContain('Command cancelled'));
+    expect(servers.store(second).get('alertChannel', '')).toBe('');
+    const expiredId = await picker(command('settings', 'alerts', { channel: 'alerts' }));
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 300001);
+    const expired = component(expiredId, 'owner', 'select', { selected: second });
+    emit(expired);
+    await vi.waitFor(() => expect(expired.reply).toHaveBeenCalled());
+    expect(JSON.stringify(expired.reply.mock.calls)).toContain('expired');
+    const unknown = component('command-server:previous-process-token', 'owner', 'select', {
+      selected: second,
+    });
+    emit(unknown);
+    await vi.waitFor(() => expect(unknown.reply).toHaveBeenCalled());
+    expect(simulated).toHaveBeenCalledOnce();
+  });
+  it('keeps explicit IDs and global commands direct, and bounds pending prompts', async () => {
+    const explicit = command('settings', 'alerts', { channel: 'alerts', server: second });
+    emit(explicit);
+    await vi.waitFor(() => expect(output(explicit)).toContain('Alerts configured'));
+    expect(output(explicit)).not.toContain('command-server:');
+    for (const [name, sub] of [
+      ['help', ''],
+      ['pair', 'status'],
+    ]) {
+      const request = command(name, sub, { server: second });
+      emit(request);
+      await vi.waitFor(() => expect(request.editReply).toHaveBeenCalled());
+      expect(output(request)).not.toContain('command-server:');
+    }
+    for (let i = 0; i < 5; i++) await picker(command('status', ''));
+    const full = command('status', '');
+    emit(full);
+    await vi.waitFor(() => expect(output(full)).toContain('previous server selections'));
+  });
+  it('runs directly for a single saved server', async () => {
+    store.set('serverProfiles', [servers.get('default')]);
+    const request = command('settings', 'alerts', { channel: 'single-alerts' });
+    emit(request);
+    await vi.waitFor(() => expect(output(request)).toContain('Alerts configured'));
+    expect(store.get('alertChannel', '')).toBe('single-alerts');
+    expect(output(request)).not.toContain('command-server:');
+  });
+  it('preserves panel collision checks and actionable command failure responses', async () => {
+    const panel = vi.spyOn(Panel.prototype, 'create').mockResolvedValue(undefined);
+    const id = await picker(command('panel', '', {}, 'owner', 'main-panel-channel'));
+    const collision = component(id, 'owner', 'select', { selected: second });
+    emit(collision);
+    await vi.waitFor(() => expect(output(collision)).toContain('different Discord panel channel'));
+    expect(panel).not.toHaveBeenCalled();
+    servers.store(second).add({ id: '77', name: 'Outer wall', type: 'alarm' });
+    vi.spyOn(Alerts.prototype, 'send').mockRejectedValue(
+      new AlertDeliveryError('ALERT_MISSING_PERMISSIONS'),
+    );
+    const alarm = component(
+      await picker(command('alarm', 'test', { id: '77' })),
+      'owner',
+      'select',
+      { selected: second },
+    );
+    emit(alarm);
+    await vi.waitFor(() => expect(output(alarm)).toContain('Send Messages and Embed Links'));
+    expect(output(alarm)).not.toContain('Simulated notification sent');
   });
 });
 describe('one Discord client hosting multiple Rust servers', () => {

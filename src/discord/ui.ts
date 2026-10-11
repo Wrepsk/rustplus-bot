@@ -10,7 +10,7 @@ import {
 } from 'discord.js';
 import type { PairingService } from '../pairing/service';
 import type { Pairing } from '../pairing/schema';
-import type { Servers } from '../servers';
+import type { Servers, ServerProfile } from '../servers';
 
 export function card(title: string, description?: string, server?: string): EmbedBuilder {
   const embed = new EmbedBuilder()
@@ -33,6 +33,41 @@ export const button = (
     .setLabel(label.slice(0, 80))
     .setStyle(style)
     .setDisabled(disabled);
+
+export function commandServerPicker(token: string, profiles: ServerProfile[], command: string) {
+  return {
+    embeds: [
+      card(
+        '🖥 Choose a Rust server',
+        `Choose which server should run **${command}**.\nYour other command options are saved. Nothing runs until you select a server.\n\nThis private selection expires in **5 minutes**.`,
+      ),
+    ],
+    allowedMentions: { parse: [] as [] },
+    components: [
+      new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId(`command-server:${token}`)
+          .setPlaceholder('Select a Rust server…')
+          .setMinValues(1)
+          .setMaxValues(1)
+          .addOptions(
+            profiles.map((profile) => ({
+              label: profile.name.slice(0, 100),
+              value: profile.id,
+              description:
+                `${profile.enabled ? 'Monitoring enabled' : 'Paused'} • ${profile.ip}:${profile.port}`.slice(
+                  0,
+                  100,
+                ),
+            })),
+          ),
+      ),
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        button(`command-cancel:${token}`, 'Cancel'),
+      ),
+    ],
+  };
+}
 
 export function inboxView(service: PairingService, user: string, requested = 0, notice = '') {
   const entries = service.inbox(user).reverse();
