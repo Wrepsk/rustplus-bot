@@ -102,6 +102,22 @@ describe('self-hosted browser pairing', () => {
     );
     expect(register).toHaveBeenCalledWith(token, expect.any(AbortSignal));
   });
+  it('passes opaque Base64 credentials unchanged to registration and keeps them out of responses', async () => {
+    const session = await start();
+    const opaque = 'A'.repeat(189) + '+/==';
+    const address = new URL(session.callback);
+    address.searchParams.set('steamId', '76561198000000000');
+    address.searchParams.set('token', opaque);
+    expect(parseSteamReturn(address.href, session.callback)).toBe(opaque);
+    const response = await post(
+      '/api/complete',
+      { address: address.href, csrf: session.csrf },
+      session.cookie,
+    );
+    expect(response.status).toBe(200);
+    expect(register).toHaveBeenCalledWith(opaque, expect.any(AbortSignal));
+    expect(await response.text()).not.toContain(opaque);
+  });
   it('rejects cross-origin, missing-cookie and forged-CSRF requests', async () => {
     expect(
       (await post('/api/start', { code: challenge.code }, '', 'https://evil.example')).status,
@@ -240,6 +256,21 @@ describe('self-hosted browser pairing', () => {
   });
 });
 describe('Steam return parser', () => {
+  it('rejects whitespace, controls and oversized opaque tokens', () => {
+    const callback = 'http://localhost:55555/callback/nonce';
+    for (const token of [
+      'A'.repeat(10001),
+      'A'.repeat(20) + '\n',
+      'A'.repeat(20) + '\r',
+      'A'.repeat(20) + '\0',
+      'A'.repeat(20) + ' ',
+    ]) {
+      const address = new URL(callback);
+      address.searchParams.set('steamId', '76561198000000000');
+      address.searchParams.set('token', token);
+      expect(() => parseSteamReturn(address.href, callback)).toThrow();
+    }
+  });
   it('rejects credentials, duplicate Steam IDs and missing token fields', () => {
     const callback = 'http://localhost:55555/callback/nonce';
     for (const address of [

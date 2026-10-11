@@ -1,3 +1,5 @@
+import { companionTokenPattern, handoffErrors } from './handoff';
+
 export const page = String.raw`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Link Rust+ · Rust Base</title><meta name="description" content="Link your Rust+ account to your friends’ Discord bot.">
@@ -38,6 +40,7 @@ export const styles = String.raw`
 export const script = String.raw`
 'use strict';
 const $ = (id) => document.getElementById(id);
+const handoffErrors = ${JSON.stringify(handoffErrors)};
 let csrf = '', loginUrl = '', callback = '', returnedAddress = '', extensionReady = false;
 let loginTimer;
 const params = new URLSearchParams(location.hash.slice(1));
@@ -56,18 +59,19 @@ const extensionStatus = () => {
 window.addEventListener('message', (event) => {
   if (event.source !== window || event.origin !== location.origin) return;
   if (event.data?.type === 'RUST_BASE_READY') {
-    extensionReady = /^1\.0\.([1-9]\d*)$/.test(event.data.version || ''); extensionStatus();
+    extensionReady = /^1\.0\.([2-9]|[1-9]\d+)$/.test(event.data.version || ''); extensionStatus();
     if (!extensionReady) status('Update the pairing extension: download the new ZIP, replace its files, click Reload in chrome://extensions, and refresh this page.', true);
   }
   if (event.data?.type === 'RUST_BASE_ERROR') {
-    clearTimeout(loginTimer); status('The extension could not return this login. Update or reload the extension, refresh this page, and start a fresh sign-in. Keep the original website tab open throughout.', true);
+    const code = Object.hasOwn(handoffErrors, event.data.code) ? event.data.code : 'DELIVERY_FAILED';
+    clearTimeout(loginTimer); status('Pairing failed [' + code + ']: ' + handoffErrors[code], true);
   }
   if (event.data?.type !== 'RUST_BASE_RESULT' || typeof event.data.address !== 'string' || event.data.address.length > 12000 || !callback) return;
   try {
     const result = new URL(event.data.address);
     if (result.origin + result.pathname !== callback || result.username || result.password || result.hash ||
         result.searchParams.getAll('steamId').length !== 1 || result.searchParams.getAll('token').length !== 1 ||
-        !/^\d{17}$/.test(result.searchParams.get('steamId') || '') || !/^[A-Za-z0-9._~-]{20,10000}$/.test(result.searchParams.get('token') || '')) return;
+        !/^\d{17}$/.test(result.searchParams.get('steamId') || '') || !${companionTokenPattern}.test(result.searchParams.get('token') || '')) return;
     returnedAddress = result.href; clearTimeout(loginTimer);
     $('finish').disabled = false;
     $('login-progress').textContent = 'Steam sign-in complete. Create your Discord command below.';

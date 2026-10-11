@@ -93,7 +93,7 @@ describe('website extension pairing', () => {
       expect.objectContaining({ type: 'RUST_BASE_START' }),
       expect.anything(),
     );
-    ui.message({ type: 'RUST_BASE_READY', version: '1.0.1' });
+    ui.message({ type: 'RUST_BASE_READY', version: '1.0.2' });
     await ui.click('steam');
     expect(ui.window.postMessage).toHaveBeenLastCalledWith(
       { type: 'RUST_BASE_START', loginUrl: ui.loginUrl },
@@ -105,14 +105,14 @@ describe('website extension pairing', () => {
   it('blocks the outdated extension and displays a useful handoff failure', async () => {
     const ui = browser();
     await ui.click('prepare');
-    ui.message({ type: 'RUST_BASE_READY', version: '1.0.0' });
+    ui.message({ type: 'RUST_BASE_READY', version: '1.0.1' });
     expect(ui.get('status').textContent).toContain('Update the pairing extension');
     await ui.click('steam');
     expect(ui.window.postMessage).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: 'RUST_BASE_START' }),
       expect.anything(),
     );
-    ui.message({ type: 'RUST_BASE_READY', version: '1.0.1' });
+    ui.message({ type: 'RUST_BASE_READY', version: '1.0.2' });
     ui.message({ type: 'RUST_BASE_ERROR' });
     expect(ui.get('status').textContent).toContain('could not return this login');
   });
@@ -134,5 +134,32 @@ describe('website extension pairing', () => {
     expect(JSON.parse(ui.fetch.mock.calls[1][1].body)).toEqual({ address, csrf: 'csrf' });
     expect(ui.get('command').value).toBe('encrypted-command');
     expect(ui.storage.has('rust-base-code')).toBe(false);
+  });
+  it('preserves + / = in the opaque token through the website completion request', async () => {
+    const ui = browser();
+    await ui.click('prepare');
+    const token = 'A'.repeat(189) + '+/==';
+    const address = new URL(ui.callback);
+    address.searchParams.set('steamId', '76561198000000000');
+    address.searchParams.set('token', token);
+    ui.message({ type: 'RUST_BASE_RESULT', address: address.href });
+    expect(ui.get('login-progress').textContent).toContain('Steam sign-in complete');
+    expect(ui.get('address').value).toBe('');
+    expect([...ui.storage.values()].join('')).not.toContain(token);
+    await ui.click('finish');
+    const body = JSON.parse(ui.fetch.mock.calls[1][1].body);
+    expect(new URL(body.address).searchParams.get('token')).toBe(token);
+  });
+  it('shows only allowlisted diagnostics and never an error payload from an extension message', () => {
+    const ui = browser();
+    ui.message({ type: 'RUST_BASE_ERROR', code: 'WEBSITE_RECEIVER' });
+    expect(ui.get('status').textContent).toContain('[WEBSITE_RECEIVER]');
+    ui.message({
+      type: 'RUST_BASE_ERROR',
+      code: 'private-token-never-display',
+      error: 'private-token-never-display',
+    });
+    expect(ui.get('status').textContent).toContain('[DELIVERY_FAILED]');
+    expect(ui.get('status').textContent).not.toContain('private-token');
   });
 });

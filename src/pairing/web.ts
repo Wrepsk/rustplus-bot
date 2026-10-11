@@ -6,6 +6,7 @@ import { registerCompanion, type Registration } from './registration';
 import { page, script, styles } from './web-page';
 import { listenerSchema } from './schema';
 import { extensionZip } from './extension';
+import { companionTokenPattern } from './handoff';
 
 interface Session {
   code: string;
@@ -57,7 +58,7 @@ export function parseSteamReturn(address: string, expected: string): string {
       'That address does not belong to this login attempt. Open Steam sign-in from this page again.',
     );
   const token = url.searchParams.get('token') || '';
-  if (!/^[A-Za-z0-9._~-]{20,10000}$/.test(token))
+  if (!companionTokenPattern.test(token))
     throw new WebError(
       400,
       'The login address has no valid Rust+ token. Complete the Steam login first.',

@@ -1,12 +1,15 @@
 import { runInNewContext, Script } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 import { extensionFiles, extensionZip, nativeBridge, nativeRelay } from '../src/pairing/extension';
+import { companionTokenPattern } from '../src/pairing/handoff';
 
 const origin = 'https://pair.example.org',
   fp = 'https://companion-rust.facepunch.com';
 const callback = 'http://localhost:55555/callback/0123456789abcdef0123456789abcdef';
 const loginUrl = `${fp}/login?returnUrl=${encodeURIComponent(callback)}`;
 const auth = { SteamId: '76561198000000000', Token: 'synthetic-auth-token-never-real' };
+// Synthetic opaque token with the character classes rejected by 1.0.1.
+const base64Auth = { ...auth, Token: 'A'.repeat(189) + '+/==' };
 interface Sender {
   frameId: number;
   tab: { id: number };
@@ -98,6 +101,7 @@ describe('self-hosted pairing extension', () => {
   it('packages valid scripts and a reproducible ZIP with narrowly scoped permissions', () => {
     const files = extensionFiles(origin);
     const manifest = JSON.parse(files['manifest.json']);
+    expect(manifest.version).toBe('1.0.2');
     expect(manifest.permissions).toEqual(['storage', 'webRequest']);
     expect(manifest.host_permissions).toEqual([fp + '/*', origin + '/*']);
     expect(manifest.content_scripts[0].world).toBe('MAIN');
@@ -155,7 +159,10 @@ describe('self-hosted pairing extension', () => {
       expect(await w.message({ type: 'start', loginUrl: url })).toEqual({ ok: false });
     expect(w.chrome.tabs.create).not.toHaveBeenCalled();
     await w.message({ type: 'start', loginUrl });
-    expect(await w.message({ type: 'native', ...auth }, w.native(999))).toEqual({ ok: false });
+    expect(await w.message({ type: 'native', ...auth }, w.native(999))).toEqual({
+      ok: false,
+      code: 'NO_SESSION',
+    });
     expect(
       await w.message(
         { type: 'native', ...auth },
@@ -168,10 +175,16 @@ describe('self-hosted pairing extension', () => {
     const w = worker();
     await w.message({ type: 'start', loginUrl });
     w.chrome.tabs.get.mockResolvedValueOnce({ url: 'https://evil.example/' });
-    expect(await w.message({ type: 'native', ...auth }, w.native())).toEqual({ ok: false });
+    expect(await w.message({ type: 'native', ...auth }, w.native())).toEqual({
+      ok: false,
+      code: 'WEBSITE_NAVIGATED',
+    });
     const entry = w.storage['rust-base:100'] as { expires: number };
     entry.expires = Date.now() - 1;
-    expect(await w.message({ type: 'native', ...auth }, w.native())).toEqual({ ok: false });
+    expect(await w.message({ type: 'native', ...auth }, w.native())).toEqual({
+      ok: false,
+      code: 'SESSION_EXPIRED',
+    });
     expect(w.chrome.tabs.sendMessage).not.toHaveBeenCalled();
     expect(Object.keys(w.storage)).toHaveLength(0);
   });
@@ -191,7 +204,10 @@ describe('self-hosted pairing extension', () => {
     );
     await w.message({ type: 'start', loginUrl });
     expect(Object.keys(w.storage).sort()).toEqual(['rust-base:101', 'rust-base:102']);
-    expect(await w.message({ type: 'native', ...auth }, w.native(100))).toEqual({ ok: false });
+    expect(await w.message({ type: 'native', ...auth }, w.native(100))).toEqual({
+      ok: false,
+      code: 'NO_SESSION',
+    });
     await w.message({ type: 'native', ...auth }, w.native(101));
     expect(w.chrome.tabs.sendMessage.mock.calls[0][0]).toBe(2);
     await w.message({ type: 'native', ...auth }, w.native(102));
@@ -219,7 +235,10 @@ describe('self-hosted pairing extension', () => {
     const w = worker();
     await w.message({ type: 'start', loginUrl });
     w.chrome.tabs.sendMessage.mockRejectedValueOnce(new Error('Original document closed'));
-    expect(await w.message({ type: 'native', ...auth }, w.native())).toEqual({ ok: false });
+    expect(await w.message({ type: 'native', ...auth }, w.native())).toEqual({
+      ok: false,
+      code: 'WEBSITE_RECEIVER',
+    });
     expect(JSON.stringify(w.storage)).not.toContain(auth.Token);
     expect(JSON.stringify(w.chrome.tabs.update.mock.calls)).not.toContain(auth.Token);
     w.removed(1);
@@ -236,12 +255,59 @@ describe('self-hosted pairing extension', () => {
     await w.message({ type: 'failed' }, w.native());
     expect(w.chrome.tabs.sendMessage).toHaveBeenCalledWith(
       1,
-      { type: 'error' },
+      { type: 'error', code: 'DELIVERY_FAILED' },
       { documentId: site.documentId },
     );
     w.chrome.tabs.get.mockResolvedValueOnce({ url: 'https://evil.example/' });
     await w.message({ type: 'failed' }, w.native());
     expect(w.chrome.tabs.sendMessage).toHaveBeenCalledOnce();
+  });
+  it('preserves standard Base64 symbols through worker delivery and loopback headers', async () => {
+    for (const redirect of [false, true]) {
+      const w = worker();
+      await w.message({ type: 'start', loginUrl });
+      if (redirect) {
+        const address = new URL(callback);
+        address.searchParams.set('steamId', base64Auth.SteamId);
+        address.searchParams.set('token', base64Auth.Token);
+        w.headers({
+          tabId: 100,
+          type: 'main_frame',
+          statusCode: 302,
+          responseHeaders: [{ name: 'Location', value: address.href }],
+        });
+        await w.message({ type: 'unknown' });
+      } else {
+        expect(await w.message({ type: 'native', ...base64Auth }, w.native())).toEqual({
+          ok: true,
+        });
+      }
+      const payload = w.chrome.tabs.sendMessage.mock.calls[0][1];
+      expect(new URL(payload.address).searchParams.get('token')).toBe(base64Auth.Token);
+      expect(payload.address).toContain('%2B%2F%3D%3D');
+      expect(JSON.stringify(w.storage)).not.toContain(base64Auth.Token);
+      expect(JSON.stringify(w.chrome.tabs.update.mock.calls)).not.toContain(base64Auth.Token);
+    }
+  });
+  it('distinguishes closed tabs and unacknowledged website delivery without logging exceptions', async () => {
+    const w = worker();
+    await w.message({ type: 'start', loginUrl });
+    w.chrome.tabs.get.mockRejectedValueOnce(new Error(auth.Token));
+    expect(await w.message({ type: 'native', ...auth }, w.native())).toEqual({
+      ok: false,
+      code: 'WEBSITE_CLOSED',
+    });
+    w.chrome.tabs.sendMessage.mockResolvedValueOnce({ ok: false });
+    expect(await w.message({ type: 'native', ...auth }, w.native())).toEqual({
+      ok: false,
+      code: 'WEBSITE_REJECTED',
+    });
+    await w.message({ type: 'failed', code: auth.Token }, w.native());
+    expect(w.chrome.tabs.sendMessage).toHaveBeenLastCalledWith(
+      1,
+      { type: 'error', code: 'DELIVERY_FAILED' },
+      { documentId: site.documentId },
+    );
   });
 });
 
@@ -345,7 +411,12 @@ describe('Facepunch native handoff bridge', () => {
       if (rejected) b.sendMessage.mockRejectedValueOnce(new Error('message port closed'));
       else b.sendMessage.mockResolvedValueOnce({ ok: false });
       b.window.ReactNativeWebView!.postMessage(JSON.stringify(auth));
-      await vi.waitFor(() => expect(b.sendMessage).toHaveBeenCalledWith({ type: 'failed' }));
+      await vi.waitFor(() =>
+        expect(b.sendMessage).toHaveBeenCalledWith({
+          type: 'failed',
+          code: rejected ? 'MESSAGE_PORT' : 'DELIVERY_FAILED',
+        }),
+      );
       expect(b.sendMessage).not.toHaveBeenCalledWith({ type: 'finish' });
       expect([...b.values.values()].join('')).not.toContain(auth.Token);
       expect(JSON.stringify(b.warn.mock.calls)).not.toContain(auth.Token);
@@ -359,7 +430,35 @@ describe('Facepunch native handoff bridge', () => {
     b.window.ReactNativeWebView!.postMessage('not-json');
     b.window.ReactNativeWebView!.postMessage(JSON.stringify({ ...auth, SteamId: 'bad' }));
     expect(b.sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'native' }));
-    expect(b.sendMessage).toHaveBeenCalledWith({ type: 'failed' });
+    expect(b.sendMessage).toHaveBeenCalledWith({ type: 'failed', code: 'AUTH_PAYLOAD' });
+    expect(b.sendMessage).toHaveBeenCalledWith({ type: 'failed', code: 'AUTH_STEAM_ID' });
+    expect(JSON.stringify(b.warn.mock.calls)).not.toContain(auth.Token);
+  });
+  it('accepts a 193-character opaque Base64 token without normalizing its characters', async () => {
+    const b = bridge(true);
+    b.window.ReactNativeWebView!.postMessage(JSON.stringify(base64Auth));
+    await vi.waitFor(() => expect(b.sendMessage).toHaveBeenCalledWith({ type: 'finish' }));
+    expect(b.sendMessage).toHaveBeenCalledWith({ type: 'native', ...base64Auth });
+    expect(b.warn).not.toHaveBeenCalled();
+  });
+  it('still rejects whitespace, controls, oversized and malformed tokens with safe diagnostics', () => {
+    const b = bridge(true);
+    for (const Token of [
+      '',
+      'short',
+      'A'.repeat(10001),
+      auth.Token + '\n',
+      auth.Token + '\r',
+      auth.Token + '\0',
+      auth.Token + ' ',
+      auth.Token + 'é',
+      null,
+    ]) {
+      expect(typeof Token === 'string' && companionTokenPattern.test(Token)).toBe(false);
+      b.window.ReactNativeWebView!.postMessage(JSON.stringify({ ...auth, Token }));
+    }
+    expect(b.sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'native' }));
+    expect(b.sendMessage).toHaveBeenCalledWith({ type: 'failed', code: 'AUTH_TOKEN_FORMAT' });
     expect(JSON.stringify(b.warn.mock.calls)).not.toContain(auth.Token);
   });
 });
