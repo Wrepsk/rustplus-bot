@@ -40,6 +40,9 @@ export class Management {
   owns(customId: string): boolean {
     return customId.startsWith(`view:${this.id}:`);
   }
+  setServerName(name: string): void {
+    this.label = name;
+  }
   private key(user: string, section: string, action: string, value = '0'): string {
     return `view:${this.id}:${user}:${section}:${action}:${value}`;
   }

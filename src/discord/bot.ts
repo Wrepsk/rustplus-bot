@@ -180,6 +180,12 @@ export class Bot {
   dispatch(interaction: Interaction): void {
     if (!this.stopping) this.track(this.interaction(interaction), 'interaction');
   }
+  setServerName(name: string): void {
+    this.config.BASE_NAME = name;
+    if (this.runtime) this.runtime.label = name;
+    this.management.setServerName(name);
+    this.panel.setServerName(name);
+  }
   async executeSelectedCommand(
     input: CommandInput,
     response: StringSelectMenuInteraction,
@@ -559,7 +565,7 @@ export class Bot {
     }
     await reply(
       'Rust+ bot commands',
-      '`/panel` — Create or refresh base controls (admin)\n`/device add|remove|rename|list|status` — Manage paired devices (admin)\n`/alarm list|enable|disable|test` — Smart Alarm notifications (admin)\n`/chat setup|enable|disable|status` — Team chat synchronization\n`/settings role-add|role-remove|roles|alerts` — Configure access and alerts (admin)\n`/server list|use|pause|resume` — Manage saved Rust servers\n`/pair start|import|inbox|accept|status|unlink` — Pair servers, devices and personal chat accounts\n`/status` — Connection, server and device information\n`/ping` — Latency\n`/help` — This guide\n\nWith multiple saved servers, omit the server argument to choose by name from a private menu. /server use also works without an ID. Switch buttons and Discord-to-Rust chat require an operator role or administrator access. Personal Rust+ linking is required for chat. Switch power does not indicate physical door position.',
+      '`/panel` — Create or refresh base controls (admin)\n`/device add|remove|rename|list|status` — Manage paired devices (admin)\n`/alarm list|enable|disable|test` — Smart Alarm notifications (admin)\n`/chat setup|enable|disable|status` — Team chat synchronization\n`/settings role-add|role-remove|roles|alerts` — Configure access and alerts (admin)\n`/server list|use|pause|resume|rename` — Manage saved Rust servers\n`/pair start|import|inbox|accept|status|unlink` — Pair servers, devices and personal chat accounts\n`/status` — Connection, server and device information\n`/ping` — Latency\n`/help` — This guide\n\nWith multiple saved servers, omit the server argument to choose by name from a private menu. /server use also works without an ID. Switch buttons and Discord-to-Rust chat require an operator role or administrator access. Personal Rust+ linking is required for chat. Switch power does not indicate physical door position.',
     );
   }
   async stop(updatePanel = false): Promise<void> {

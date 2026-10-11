@@ -44,6 +44,10 @@ export class Panel {
         });
     }, 1200);
   }
+  setServerName(name: string): void {
+    this.label = name;
+    this.schedule();
+  }
   private payload(page = 0) {
     const switches = this.store.devices().filter((d) => d.type === 'switch');
     // Four switches plus a navigation row fit Discord's five action-row limit.
@@ -121,10 +125,10 @@ export class Panel {
   create(channelId: string): Promise<void> {
     return this.serialize(async () => {
       const existing = this.store.get<PanelReference | null>('panel', null);
-      let channel = await this.client.channels.fetch(existing?.channelId || channelId);
+      const channel = await this.client.channels.fetch(channelId);
       if (!channel || !channel.isTextBased() || !('send' in channel))
         throw new Error('Use a guild text channel.');
-      if (existing) {
+      if (existing?.channelId === channelId) {
         try {
           const message = await channel.messages.fetch(existing.messageId);
           await message.edit(this.payload(existing.page));
@@ -134,11 +138,34 @@ export class Panel {
             throw error;
         }
       }
-      channel = await this.client.channels.fetch(channelId);
-      if (!channel || !channel.isTextBased() || !('send' in channel))
-        throw new Error('Use a guild text channel.');
       const message = await channel.send(this.payload());
       this.store.set('panel', { channelId, messageId: message.id, page: 0 });
+      if (existing && existing.channelId !== channelId) {
+        // The persisted message ID is already switched, so old buttons are inactive
+        // even if Discord denies the cosmetic cleanup below.
+        try {
+          const previous = await this.client.channels.fetch(existing.channelId);
+          if (previous?.isTextBased())
+            await (
+              await previous.messages.fetch(existing.messageId)
+            ).edit({
+              embeds: [
+                card(
+                  'Base control panel moved',
+                  `Use the current panel in <#${channelId}>.`,
+                  this.label,
+                ),
+              ],
+              components: [],
+              allowedMentions: { parse: [] },
+            });
+        } catch (error) {
+          log.warn(
+            { code: errorCode(error) },
+            'Previous panel cleanup failed; its controls are inactive',
+          );
+        }
+      }
     });
   }
   refresh(page?: number): Promise<void> {

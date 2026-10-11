@@ -166,7 +166,7 @@ export function serversView(servers: Servers, user: string, state: (id: string) 
   const selected = servers.selected(user);
   const embed = card(
     '🖥 Rust servers',
-    'Choose your default server below. Each server keeps its own controls, alarms and chat channel. Pair another server through `/pair start`.',
+    'Choose your default server below. Each server keeps its own controls, alarms and chat channel. Administrators can rename one with `/server rename`. Pair another server through `/pair start`.',
   );
   for (const profile of servers.list()) {
     const store = servers.store(profile.id),

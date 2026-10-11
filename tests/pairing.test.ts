@@ -213,6 +213,7 @@ describe('server profiles and database upgrade', () => {
       playerToken: pairing.playerToken,
     });
     servers.select('alice', second.id);
+    servers.rename(second.id, '  Renamed Trio  ');
     servers.store(second.id).add({ id: '42', name: 'Lights', type: 'switch' });
     const secondVault = new CredentialVault(join(path, 'credentials.key'));
     const stored = store.get(`identity:${second.id}:alice`, '');
@@ -229,6 +230,8 @@ describe('server profiles and database upgrade', () => {
     const recovered = new Servers(config, reopened);
     registries.push(recovered);
     expect(recovered.selected('alice')).toBe(second.id);
+    expect(recovered.get(second.id).name).toBe('Renamed Trio');
+    expect(recovered.connectionConfig(second.id).BASE_NAME).toBe('Renamed Trio');
     expect(recovered.identity(second.id, 'alice')?.playerToken).toBe('-456');
     expect(recovered.store(second.id).device('42').name).toBe('Lights');
   });

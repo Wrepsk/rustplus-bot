@@ -14,6 +14,7 @@ import { PlayerActivity } from '../src/activity';
 import { Panel } from '../src/discord/panel';
 import { Alerts, AlertDeliveryError } from '../src/discord/alerts';
 import { commands } from '../src/discord/commands';
+import type { Bot } from '../src/discord/bot';
 
 let directory: string, store: Store, servers: Servers, host: DiscordHost, second: string;
 let config: Config;
@@ -437,7 +438,9 @@ describe('slash-command server picker', () => {
     expect(servers.get(second).enabled).toBe(true);
     expect(servers.get('default').enabled).toBe(true);
     const useCommand = commands.find((c) => c.name === 'server')!;
-    expect(JSON.stringify(useCommand)).not.toContain('"required":true');
+    expect(JSON.stringify(useCommand.options?.find((o) => o.name === 'use'))).not.toContain(
+      '"required":true',
+    );
   });
   it("rejects other users, another guild and forged choices without consuming the owner's selection", async () => {
     const id = await picker(command('settings', 'alerts', { channel: 'alerts' }));
@@ -532,13 +535,13 @@ describe('slash-command server picker', () => {
     expect(store.get('alertChannel', '')).toBe('single-alerts');
     expect(output(request)).not.toContain('command-server:');
   });
-  it('preserves panel collision checks and actionable command failure responses', async () => {
+  it('allows another server panel in the same channel and preserves actionable failure responses', async () => {
     const panel = vi.spyOn(Panel.prototype, 'create').mockResolvedValue(undefined);
     const id = await picker(command('panel', '', {}, 'owner', 'main-panel-channel'));
-    const collision = component(id, 'owner', 'select', { selected: second });
-    emit(collision);
-    await vi.waitFor(() => expect(output(collision)).toContain('different Discord panel channel'));
-    expect(panel).not.toHaveBeenCalled();
+    const selection = component(id, 'owner', 'select', { selected: second });
+    emit(selection);
+    await vi.waitFor(() => expect(output(selection)).toContain('Panel created or refreshed'));
+    expect(panel).toHaveBeenCalledWith('main-panel-channel');
     servers.store(second).add({ id: '77', name: 'Outer wall', type: 'alarm' });
     vi.spyOn(Alerts.prototype, 'send').mockRejectedValue(
       new AlertDeliveryError('ALERT_MISSING_PERMISSIONS'),
@@ -552,6 +555,63 @@ describe('slash-command server picker', () => {
     emit(alarm);
     await vi.waitFor(() => expect(output(alarm)).toContain('Send Messages and Embed Links'));
     expect(output(alarm)).not.toContain('Simulated notification sent');
+  });
+  it('renames through the picker and updates live display names without reconnecting or changing registrations', async () => {
+    const sessions = (host as unknown as { sessions: Map<string, { bot: Bot; rust: Connection }> })
+      .sessions;
+    const session = sessions.get(second)!;
+    const credentials = servers.connectionConfig(second);
+    const panelId = servers.store(second).get('panel', null);
+    const start = vi.spyOn(session.rust, 'start');
+    const stop = vi.spyOn(session.rust, 'stop');
+    const schedule = vi.spyOn(session.bot.panel, 'schedule').mockImplementation(() => {});
+    const select = component(
+      await picker(command('server', 'rename', { name: '  Trio Vanilla  ' })),
+      'owner',
+      'select',
+      { selected: second },
+    );
+    emit(select);
+    await vi.waitFor(() => expect(output(select)).toContain('Server renamed'));
+    expect(servers.get(second).name).toBe('Trio Vanilla');
+    expect(start).not.toHaveBeenCalled();
+    expect(stop).not.toHaveBeenCalled();
+    expect(schedule).toHaveBeenCalledOnce();
+    expect(servers.store(second).get('panel', null)).toEqual(panelId);
+    expect(servers.store(second).device('42').name).toBe('Second lights');
+    expect(servers.connectionConfig(second)).toEqual({ ...credentials, BASE_NAME: 'Trio Vanilla' });
+    expect(JSON.stringify(session.bot.management.view('status', 'owner'))).toContain(
+      'Trio Vanilla',
+    );
+    const send = vi.fn(async () => ({}));
+    vi.spyOn(host.client.channels, 'fetch').mockResolvedValue({
+      isTextBased: () => true,
+      send,
+    } as never);
+    servers.store(second).set('alertChannel', 'alerts');
+    await session.bot.alerts.send(
+      { id: '77', name: 'Test sensor', type: 'alarm', enabled: true, sensitive: false },
+      true,
+    );
+    expect(JSON.stringify(send.mock.calls)).toContain('Trio Vanilla');
+    expect(JSON.stringify(send.mock.calls)).not.toContain('Second');
+  });
+  it('restricts renaming to administrators and validates names, including paused servers', async () => {
+    const denied = command('server', 'rename', { server: second, name: 'Nope' }, 'friend');
+    emit(denied);
+    await vi.waitFor(() => expect(output(denied)).toContain('Administrator'));
+    for (const name of ['   ', 'a'.repeat(81), 'Bad\nName']) {
+      const invalid = command('server', 'rename', { server: second, name });
+      emit(invalid);
+      await vi.waitFor(() => expect(output(invalid)).toContain('1–80 characters'));
+    }
+    expect(servers.get(second).name).toBe('Second');
+    servers.enable(second, false);
+    const rename = command('server', 'rename', { server: second, name: 'Paused Duo' });
+    emit(rename);
+    await vi.waitFor(() => expect(output(rename)).toContain('Server renamed'));
+    expect(servers.get(second).enabled).toBe(false);
+    expect(servers.get(second).name).toBe('Paused Duo');
   });
 });
 describe('one Discord client hosting multiple Rust servers', () => {
@@ -603,6 +663,8 @@ describe('one Discord client hosting multiple Rust servers', () => {
     expect(host.client.listenerCount(Events.MessageCreate)).toBe(1);
   });
   it('routes identical persistent entity IDs using the panel message, not the selected server', async () => {
+    store.set('panel', { channelId: 'shared-panels', messageId: 'main-panel' });
+    servers.store(second).set('panel', { channelId: 'shared-panels', messageId: 'second-panel' });
     servers.select('owner', second);
     const control = vi.spyOn(Connection.prototype, 'setSwitch').mockResolvedValue(true);
     const interaction = Object.assign(command('', ''), {
@@ -621,6 +683,18 @@ describe('one Discord client hosting multiple Rust servers', () => {
     await vi.waitFor(() => expect(output(interaction)).toContain('Switch state confirmed'));
     expect(output(interaction)).toContain('Main lights');
     expect(output(interaction)).not.toContain('Second lights');
+    const secondControl = Object.assign(command('', ''), {
+      channelId: 'shared-panels',
+      isChatInputCommand: () => false,
+      isButton: () => true,
+      customId: 'switch:on:42',
+      message: { id: 'second-panel' },
+    });
+    emit(secondControl);
+    await vi.waitFor(() => expect(output(secondControl)).toContain('Switch state confirmed'));
+    expect(output(secondControl)).toContain('Second lights');
+    expect(output(secondControl)).not.toContain('Main lights');
+    expect(control).toHaveBeenCalledTimes(2);
   });
   it('rejects unauthorized forged controls and administrative pause attempts', async () => {
     role = [];

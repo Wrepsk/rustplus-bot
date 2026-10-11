@@ -21,6 +21,19 @@ export const commands = [
     )
     .addSubcommand((s) =>
       s.setName('resume').setDescription('Resume monitoring and chat for this server'),
+    )
+    .addSubcommand((s) =>
+      s
+        .setName('rename')
+        .setDescription('Rename a saved Rust server (administrator)')
+        .addStringOption((o) =>
+          o
+            .setName('name')
+            .setDescription('New friendly server name')
+            .setRequired(true)
+            .setMinLength(1)
+            .setMaxLength(80),
+        ),
     ),
   new SlashCommandBuilder()
     .setName('pair')

@@ -94,6 +94,49 @@ describe('persistent Discord control panel', () => {
       f.store.close();
     }
   });
+  it('moves to the requested channel and retires the previous message', async () => {
+    const f = fixture();
+    try {
+      await f.panel.create('old-channel');
+      const moved = { id: 'moved-panel', edit: vi.fn(async () => ({})) };
+      f.send.mockResolvedValueOnce(moved);
+      await f.panel.create('shared-panels');
+      expect(f.store.get('panel', null)).toMatchObject({
+        channelId: 'shared-panels',
+        messageId: 'moved-panel',
+      });
+      expect(f.panel.isPanel('panel1')).toBe(false);
+      expect(f.panel.isPanel('moved-panel')).toBe(true);
+      expect(f.message.edit).toHaveBeenCalledWith(expect.objectContaining({ components: [] }));
+      f.fetch.mockResolvedValue(moved);
+      await f.panel.create('shared-panels');
+      expect(f.send).toHaveBeenCalledTimes(2);
+      expect(moved.edit).toHaveBeenCalledOnce();
+      f.panel.setServerName('Renamed server');
+      await f.panel.refresh();
+      expect(JSON.stringify(moved.edit.mock.calls)).toContain('Renamed server');
+    } finally {
+      f.panel.stop();
+      f.store.close();
+    }
+  });
+  it('keeps the old panel on failed creation and rejects old buttons even if cleanup fails', async () => {
+    const f = fixture();
+    try {
+      await f.panel.create('old-channel');
+      f.send.mockRejectedValueOnce(new Error('Synthetic send failure'));
+      await expect(f.panel.create('shared-panels')).rejects.toThrow('send failure');
+      expect(f.panel.isPanel('panel1')).toBe(true);
+      f.send.mockResolvedValueOnce({ id: 'new-panel', edit: vi.fn(async () => ({})) });
+      f.fetch.mockRejectedValueOnce({ code: 50001 });
+      await f.panel.create('shared-panels');
+      expect(f.panel.isPanel('new-panel')).toBe(true);
+      expect(f.panel.isPanel('panel1')).toBe(false);
+    } finally {
+      f.panel.stop();
+      f.store.close();
+    }
+  });
   it('coalesces repeated background updates during a slow Discord edit and drains on shutdown', async () => {
     vi.useFakeTimers();
     const f = fixture();

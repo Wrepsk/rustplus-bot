@@ -135,6 +135,21 @@ export class Servers {
       this.list().map((p) => (p.id === id ? { ...p, enabled } : p)),
     );
   }
+  rename(id: string, input: string): ServerProfile {
+    const name = input.trim();
+    if (
+      !name ||
+      name.length > 80 ||
+      [...name].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127)
+    )
+      throw new Error('Server name must contain 1–80 characters with no control characters.');
+    const profile = { ...this.get(id), name };
+    this.root.set(
+      'serverProfiles',
+      this.list().map((p) => (p.id === id ? profile : p)),
+    );
+    return profile;
+  }
   select(user: string, id: string): void {
     this.get(id);
     this.root.set(`selectedServer:${user}`, id);

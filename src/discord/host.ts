@@ -247,7 +247,7 @@ export class DiscordHost {
     const name = interaction.commandName;
     if (name === 'server')
       return (
-        ['use', 'pause', 'resume'].includes(interaction.options.getSubcommand()) &&
+        ['use', 'pause', 'resume', 'rename'].includes(interaction.options.getSubcommand()) &&
         !interaction.options.getString('id')
       );
     if (name === 'pair') return interaction.options.getSubcommand() === 'status';
@@ -301,19 +301,7 @@ export class DiscordHost {
       throw error;
     }
   }
-  private sessionForCommand(input: CommandInput, id: string): ServerSession {
-    if (
-      input.commandName === 'panel' &&
-      this.servers
-        .list()
-        .some(
-          (p) =>
-            p.id !== id &&
-            this.servers.store(p.id).get<{ channelId: string } | null>('panel', null)?.channelId ===
-              input.channelId,
-        )
-    )
-      throw new HostError('Each Rust server needs a different Discord panel channel.');
+  private sessionForCommand(id: string): ServerSession {
     const session = this.sessions.get(id);
     if (!session) throw new HostError('Server is paused. Use /server resume.');
     return session;
@@ -362,10 +350,7 @@ export class DiscordHost {
       else if (pending.input.commandName === 'pair')
         await interaction.editReply(pairingStatus(this.pairing, this.servers, id, principal.id));
       else if (interaction.isStringSelectMenu())
-        await this.sessionForCommand(pending.input, id).bot.executeSelectedCommand(
-          pending.input,
-          interaction,
-        );
+        await this.sessionForCommand(id).bot.executeSelectedCommand(pending.input, interaction);
     } catch (error) {
       log.warn({ code: errorCode(error) }, 'Server selection failed');
       const content =
@@ -401,6 +386,28 @@ export class DiscordHost {
           card(
             'Server selected',
             `**${escapeMarkdown(this.servers.get(id).name)}**\nDefault saved. Server-specific slash commands still let you choose before running. Other servers keep running.`,
+          ),
+        ],
+        components: [],
+        allowedMentions: { parse: [] },
+      });
+    } else if (sub === 'rename') {
+      const profile = await this.serialize(async () => {
+        let renamed;
+        try {
+          renamed = this.servers.rename(id, input.options.getString('name', true));
+        } catch (error) {
+          throw new HostError(error instanceof Error ? error.message : 'Invalid server name.');
+        }
+        this.sessions.get(id)?.bot.setServerName(renamed.name);
+        return renamed;
+      });
+      await response.editReply({
+        embeds: [
+          card(
+            'Server renamed',
+            `**${escapeMarkdown(profile.name)}**\nSaved. Panels and future alerts use this name.`,
+            profile.name,
           ),
         ],
         components: [],
@@ -499,7 +506,7 @@ export class DiscordHost {
       }
       const id = this.selected(interaction);
       if (!['server', 'pair'].includes(interaction.commandName)) {
-        this.sessionForCommand(interaction, id).bot.dispatch(interaction);
+        this.sessionForCommand(id).bot.dispatch(interaction);
         return;
       }
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
