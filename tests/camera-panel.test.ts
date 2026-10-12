@@ -109,6 +109,10 @@ it('moves a camera panel, retires old controls and retains an empty panel after 
   await f.panel.create('new-channel');
   expect(f.panel.isPanel('camera-panel', 'shared')).toBe(false);
   expect(f.panel.isPanel('new-camera-panel', 'new-channel')).toBe(true);
+  expect(f.store.get('serverPanelMessages', [])).toEqual([
+    { channelId: 'shared', messageId: 'camera-panel' },
+    { channelId: 'new-channel', messageId: 'new-camera-panel' },
+  ]);
   expect(f.edit).toHaveBeenCalledWith(expect.objectContaining({ components: [] }));
   f.registry.remove('ROOF');
   await f.panel.refresh();

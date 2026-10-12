@@ -9,6 +9,7 @@ import type { Store } from '../database';
 import type { RegisteredCamera } from '../cameras/registry';
 import { card } from './ui';
 import { errorCode, log } from '../log';
+import { rememberPanel } from './server-panels';
 
 interface Reference {
   channelId: string;
@@ -86,6 +87,7 @@ export class CameraPanel {
   create(channelId: string): Promise<void> {
     return this.serialize(async () => {
       const existing = this.store.get<Reference | null>('cameraPanel', null);
+      if (existing) rememberPanel(this.store, existing);
       const channel = await this.client.channels.fetch(channelId);
       if (!channel?.isTextBased() || !('send' in channel))
         throw new Error('Use a guild text channel.');
@@ -99,6 +101,7 @@ export class CameraPanel {
         }
       }
       const message = await channel.send(this.payload());
+      rememberPanel(this.store, { channelId, messageId: message.id });
       this.store.set('cameraPanel', { channelId, messageId: message.id });
       if (existing && existing.channelId !== channelId) {
         try {

@@ -61,6 +61,42 @@ export class Store {
       )
       .run(key, JSON.stringify(value));
   }
+  transaction<T>(work: () => T): T {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = work();
+      this.db.exec('COMMIT');
+      return result;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+  deleteSettings(matches: (key: string) => boolean): void {
+    const remove = this.db.prepare('DELETE FROM settings WHERE key=?');
+    for (const row of this.db.prepare('SELECT key FROM settings').all())
+      if (matches(String(row.key))) remove.run(row.key);
+  }
+  clearServerData(): void {
+    // The original server shares this database with global pairing/profile settings.
+    const local = new Set([
+      'panel',
+      'cameraPanel',
+      'serverPanelMessages',
+      'cameras',
+      'chatChannel',
+      'chatEnabled',
+      'alertChannel',
+      'alertRole',
+      'allowedRoles',
+      'connectionOutage',
+      'lastSuccessfulConnection',
+    ]);
+    this.deleteSettings((key) => local.has(key) || key.startsWith('cameraShare:'));
+    this.db.exec(`DELETE FROM devices; DELETE FROM alarm_alerts; DELETE FROM chat_seen;
+      DELETE FROM chat_echo; DELETE FROM alarm_outbox; DELETE FROM notification_outbox;
+      DELETE FROM alarm_recovery;`);
+  }
   devices(): Device[] {
     return this.db
       .prepare('SELECT * FROM devices ORDER BY rowid')

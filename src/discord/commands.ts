@@ -95,6 +95,11 @@ export const commands = [
     )
     .addSubcommand((s) =>
       s
+        .setName('remove')
+        .setDescription('Permanently remove a server and its panels (administrator)'),
+    )
+    .addSubcommand((s) =>
+      s
         .setName('rename')
         .setDescription('Rename a saved Rust server (administrator)')
         .addStringOption((o) =>

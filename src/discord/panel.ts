@@ -4,6 +4,7 @@ import type { Store } from '../database';
 import { log, errorCode } from '../log';
 import { card } from './ui';
 import { needsConfirmation } from '../domain';
+import { rememberPanel } from './server-panels';
 
 interface PanelReference {
   channelId: string;
@@ -125,6 +126,7 @@ export class Panel {
   create(channelId: string): Promise<void> {
     return this.serialize(async () => {
       const existing = this.store.get<PanelReference | null>('panel', null);
+      if (existing) rememberPanel(this.store, existing);
       const channel = await this.client.channels.fetch(channelId);
       if (!channel || !channel.isTextBased() || !('send' in channel))
         throw new Error('Use a guild text channel.');
@@ -139,6 +141,7 @@ export class Panel {
         }
       }
       const message = await channel.send(this.payload());
+      rememberPanel(this.store, { channelId, messageId: message.id });
       this.store.set('panel', { channelId, messageId: message.id, page: 0 });
       if (existing && existing.channelId !== channelId) {
         // The persisted message ID is already switched, so old buttons are inactive

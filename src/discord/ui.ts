@@ -166,8 +166,11 @@ export function serversView(servers: Servers, user: string, state: (id: string) 
   const selected = servers.selected(user);
   const embed = card(
     '🖥 Rust servers',
-    'Choose your default server below. Each server keeps its own controls, alarms and chat channel. Administrators can rename one with `/server rename`. Pair another server through `/pair start`.',
+    servers.list().length
+      ? 'Choose your default server below. Each server keeps its own controls, alarms and chat channel. Administrators can rename one with `/server rename` or remove it below. Pair another server through `/pair start`.'
+      : 'No saved servers. Use `/pair start`, pair in-game, then accept the server in `/pair inbox`.',
   );
+  if (!selected) return { embeds: [embed], components: [], allowedMentions: { parse: [] as [] } };
   for (const profile of servers.list()) {
     const store = servers.store(profile.id),
       chat = store.get('chatChannel', '');
@@ -198,6 +201,7 @@ export function serversView(servers: Servers, user: string, state: (id: string) 
           `servers:${servers.get(selected).enabled ? 'pause' : 'resume'}:${user}:${selected}`,
           servers.get(selected).enabled ? 'Pause selected server' : 'Resume selected server',
         ),
+        button(`servers:remove:${user}:${selected}`, 'Remove selected server', ButtonStyle.Danger),
       ),
     ],
   };
@@ -207,7 +211,7 @@ export function pairingStatus(service: PairingService, servers: Servers, id: str
   const identity = servers.identity(id, user);
   return {
     embeds: [
-      card('🔗 Your Rust+ account', undefined, servers.get(id).name).addFields(
+      card('🔗 Your Rust+ account', undefined, id ? servers.get(id).name : undefined).addFields(
         { name: 'Pairing listener', value: service.status(user), inline: true },
         {
           name: 'Personal chat identity',

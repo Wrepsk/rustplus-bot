@@ -16,6 +16,7 @@ import { CameraPanel } from '../src/discord/camera-panel';
 import { Alerts, AlertDeliveryError } from '../src/discord/alerts';
 import { commands } from '../src/discord/commands';
 import type { Bot } from '../src/discord/bot';
+import { ChatIdentities } from '../src/chat-identities';
 
 let directory: string, store: Store, servers: Servers, host: DiscordHost, second: string;
 let config: Config;
@@ -150,6 +151,229 @@ function component(
   });
   return interaction;
 }
+function removalId(interaction: ReturnType<typeof command>, action = 'confirm') {
+  return output(interaction).match(new RegExp(`remove-server:[a-f0-9]+:${action}`))![0];
+}
+function mockPanelDeletion() {
+  const deleted: string[] = [];
+  const fetchMessage = vi.fn(async (id: string) => ({
+    delete: vi.fn(async () => {
+      deleted.push(id);
+    }),
+  }));
+  const fetchChannel = vi.spyOn(host.client.channels, 'fetch').mockResolvedValue({
+    isTextBased: () => true,
+    messages: { fetch: fetchMessage },
+  } as never);
+  return { deleted, fetchMessage, fetchChannel };
+}
+describe('server removal', () => {
+  it('offers removal from the server list and slash picker, then deletes only its panels after confirmation', async () => {
+    const panels = mockPanelDeletion();
+    const pauseCameras = vi.spyOn(host.cameras, 'pause');
+    const stopIdentities = vi.spyOn(ChatIdentities.prototype, 'stop');
+    const target = servers.store(second);
+    target.set('cameraPanel', { channelId: 'shared-panels', messageId: 'second-camera' });
+    target.set('serverPanelMessages', [{ channelId: 'old-channel', messageId: 'retired-panel' }]);
+    store.set('cameraPanel', { channelId: 'shared-panels', messageId: 'main-camera' });
+    servers.link(second, 'friend', { playerId: secondPairing.playerId, playerToken: '456' });
+    servers.select('friend', second);
+    const list = command('server', 'list');
+    emit(list);
+    await vi.waitFor(() => expect(output(list)).toContain('Remove selected server'));
+    const request = command('server', 'remove');
+    emit(request);
+    await vi.waitFor(() => expect(output(request)).toContain('command-server:'));
+    const pick = component(
+      output(request).match(/command-server:[a-f0-9]+/)![0],
+      'owner',
+      'select',
+      { selected: second },
+    );
+    emit(pick);
+    await vi.waitFor(() => expect(output(pick)).toContain('Permanently remove server'));
+    expect(servers.get(second).enabled).toBe(true);
+    expect(panels.deleted).toEqual([]);
+    const confirm = component(removalId(pick));
+    emit(confirm);
+    await vi.waitFor(() => expect(output(confirm)).toContain('Server removed'));
+    expect(panels.deleted.sort()).toEqual(['retired-panel', 'second-camera', 'second-panel']);
+    expect(servers.list().map((p) => p.id)).toEqual(['default']);
+    expect(servers.identity(second, 'friend')).toBeUndefined();
+    expect(store.get(`serverCredentials:${second}`, null)).toBeNull();
+    expect(servers.selected('friend')).toBe('default');
+    expect(store.device('42').name).toBe('Main lights');
+    expect(store.get('chatChannel', '')).toBe('main-chat');
+    expect(store.get('cameraPanel', null)).toMatchObject({ messageId: 'main-camera' });
+    expect(pauseCameras).toHaveBeenCalledWith(second);
+    expect(stopIdentities).toHaveBeenCalledOnce();
+    const oldButton = component('switch:on:42');
+    oldButton.message.id = 'second-panel';
+    emit(oldButton);
+    await vi.waitFor(() => expect(oldButton.reply).toHaveBeenCalled());
+    expect(host.client.listenerCount(Events.InteractionCreate)).toBe(1);
+  });
+  it('rejects non-administrators, stolen/forged confirmations, wrong guilds, expired tokens and duplicate clicks', async () => {
+    const panels = mockPanelDeletion();
+    const denied = command('server', 'remove', { server: second }, 'friend');
+    emit(denied);
+    await vi.waitFor(() => expect(output(denied)).toContain('Administrator'));
+    const forged = component('remove-server:fake:confirm');
+    emit(forged);
+    await vi.waitFor(() => expect(forged.reply).toHaveBeenCalled());
+    const request = command('server', 'remove', { server: second });
+    emit(request);
+    await vi.waitFor(() => expect(output(request)).toContain('Permanently remove server'));
+    const id = removalId(request);
+    const stolen = component(id, 'friend');
+    emit(stolen);
+    await vi.waitFor(() => expect(stolen.reply).toHaveBeenCalled());
+    const wrongGuild = component(id);
+    wrongGuild.guildId = 'other';
+    emit(wrongGuild);
+    await vi.waitFor(() => expect(wrongGuild.reply).toHaveBeenCalled());
+    expect(panels.deleted).toEqual([]);
+    const confirm = component(id),
+      duplicate = component(id);
+    emit(confirm);
+    emit(duplicate);
+    await vi.waitFor(() => expect(output(confirm)).toContain('Server removed'));
+    await vi.waitFor(() => expect(duplicate.reply).toHaveBeenCalled());
+    expect(panels.deleted).toEqual(['second-panel']);
+    const expiredRequest = command('server', 'remove', { server: 'default' });
+    emit(expiredRequest);
+    await vi.waitFor(() => expect(output(expiredRequest)).toContain('Permanently remove server'));
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now + 5 * 60000 + 1);
+    const expired = component(removalId(expiredRequest));
+    emit(expired);
+    await vi.waitFor(() => expect(expired.reply).toHaveBeenCalled());
+    expect(servers.get('default')).toBeDefined();
+  });
+  it('rechecks administrator access when confirming and supports cancellation from the server list', async () => {
+    mockPanelDeletion();
+    let administrator = true;
+    vi.mocked(host.client.guilds.fetch).mockResolvedValue({
+      id: 'guild',
+      members: {
+        fetch: async ({ user }: { user: string }) => ({
+          id: user,
+          permissions: { has: () => administrator },
+          roles: { cache: new Map([['operator', {}]]) },
+        }),
+      },
+    } as never);
+    const request = command('server', 'remove', { server: second }, 'friend');
+    emit(request);
+    await vi.waitFor(() => expect(output(request)).toContain('Permanently remove server'));
+    administrator = false;
+    const confirm = component(removalId(request), 'friend');
+    emit(confirm);
+    await vi.waitFor(() => expect(output(confirm)).toContain('Administrator'));
+    expect(servers.get(second).enabled).toBe(true);
+    const remove = component(`servers:remove:owner:${second}`);
+    emit(remove);
+    await vi.waitFor(() => expect(output(remove)).toContain('Permanently remove server'));
+    const cancel = component(removalId(remove, 'cancel'));
+    emit(cancel);
+    await vi.waitFor(() => expect(output(cancel)).toContain('Removal cancelled'));
+    expect(servers.get(second).enabled).toBe(true);
+  });
+  it('keeps a failed cleanup paused and retryable, including after partial panel deletion', async () => {
+    const panels = mockPanelDeletion();
+    servers
+      .store(second)
+      .set('cameraPanel', { channelId: 'shared-panels', messageId: 'second-camera' });
+    panels.fetchMessage
+      .mockImplementationOnce(async (id) => ({
+        delete: vi.fn(async () => {
+          panels.deleted.push(id);
+        }),
+      }))
+      .mockRejectedValueOnce({ code: 50001 });
+    const remove = command('server', 'remove', { server: second });
+    emit(remove);
+    await vi.waitFor(() => expect(output(remove)).toContain('Permanently remove server'));
+    const confirm = component(removalId(remove));
+    emit(confirm);
+    await vi.waitFor(() => expect(output(confirm)).toContain('Panel deletion failed'));
+    expect(servers.get(second).enabled).toBe(false);
+    expect(servers.store(second).device('42')).toBeDefined();
+    expect(panels.deleted).toEqual(['second-panel']);
+    expect(servers.store(second).get('panel', null)).toBeNull();
+    const retry = command('server', 'remove', { server: second });
+    emit(retry);
+    await vi.waitFor(() => expect(output(retry)).toContain('Permanently remove server'));
+    // One panel was manually removed while fixing the channel permissions.
+    panels.fetchMessage.mockRejectedValueOnce({ code: 10008 });
+    const confirmed = component(removalId(retry));
+    emit(confirmed);
+    await vi.waitFor(() => expect(output(confirmed)).toContain('Server removed'));
+    expect(panels.deleted).toEqual(['second-panel']);
+    expect(servers.list()).toHaveLength(1);
+  });
+  it('blocks new camera panels while deletion is awaiting Discord', async () => {
+    const panels = mockPanelDeletion();
+    const fetch = panels.fetchMessage.getMockImplementation()!;
+    let release!: () => void;
+    panels.fetchMessage.mockImplementationOnce(async (id) => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return fetch(id);
+    });
+    const createPanel = vi.spyOn(CameraPanel.prototype, 'create');
+    const request = command('server', 'remove', { server: second });
+    emit(request);
+    await vi.waitFor(() => expect(output(request)).toContain('Permanently remove server'));
+    const confirm = component(removalId(request));
+    emit(confirm);
+    await vi.waitFor(() => expect(panels.fetchMessage).toHaveBeenCalled());
+    try {
+      const racing = command('camera', 'panel', { server: second });
+      emit(racing);
+      await vi.waitFor(() => expect(output(racing)).toContain('being removed'));
+      expect(createPanel).not.toHaveBeenCalled();
+    } finally {
+      release();
+    }
+    await vi.waitFor(() => expect(output(confirm)).toContain('Server removed'));
+  });
+  it('can remove every server and still list, pair, and accept a new server without recreating the environment server', async () => {
+    mockPanelDeletion();
+    for (const id of [second, 'default']) {
+      const request = command('server', 'remove', { server: id });
+      emit(request);
+      await vi.waitFor(() => expect(output(request)).toContain('Permanently remove server'));
+      const confirm = component(removalId(request));
+      emit(confirm);
+      await vi.waitFor(() => expect(output(confirm)).toContain('Server removed'));
+    }
+    expect(servers.list()).toEqual([]);
+    const list = command('server', 'list'),
+      status = command('pair', 'status'),
+      start = command('pair', 'start');
+    emit(list);
+    emit(status);
+    emit(start);
+    await vi.waitFor(() => expect(output(list)).toContain('No saved servers'));
+    await vi.waitFor(() => expect(output(status)).toContain('Pairing listener'));
+    await vi.waitFor(() => expect(output(start)).toContain('Link Rust+'));
+    host.pairing.receive('owner', secondPairing);
+    const pairingId = host.pairing.inbox('owner')[0].id;
+    const accept = component(`pairui:accept:owner:${pairingId}:0`);
+    emit(accept);
+    await vi.waitFor(() => expect(accept.showModal).toHaveBeenCalled());
+    const save = component(`pairui:save:owner:${pairingId}:0`, 'owner', 'modal', {
+      name: 'Added again',
+    });
+    emit(save);
+    await vi.waitFor(() => expect(output(save)).toContain('Server pairing saved'));
+    expect(servers.list()).toHaveLength(1);
+    expect(servers.store(second).devices()).toEqual([]);
+    expect(servers.store(second).get('chatChannel', '')).toBe('');
+  });
+});
 describe('camera Discord access', () => {
   it('creates per-server camera panels in the same channel through the server picker; only admins may create them', async () => {
     const create = vi.spyOn(CameraPanel.prototype, 'create').mockResolvedValue();

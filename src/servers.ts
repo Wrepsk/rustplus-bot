@@ -25,13 +25,13 @@ export class Servers {
     readonly root: Store,
   ) {
     const keyPath = join(dirname(config.DATABASE_PATH), 'credentials.key');
-    if (root.get<ServerProfile[]>('serverProfiles', []).length && !existsSync(keyPath))
+    if (root.get<ServerProfile[] | null>('serverProfiles', null) !== null && !existsSync(keyPath))
       throw Object.assign(
         new Error('Restore the original credentials.key from the data-volume backup.'),
         { code: 'CREDENTIALS_KEY_MISSING' },
       );
     this.vault = new CredentialVault(keyPath);
-    if (!root.get<ServerProfile[]>('serverProfiles', []).length) {
+    if (root.get<ServerProfile[] | null>('serverProfiles', null) === null) {
       root.set('serverProfiles', [
         {
           id: 'default',
@@ -44,7 +44,10 @@ export class Servers {
     }
     this.stores.set('default', root);
     // The administrator's existing server pairing is already an authenticated identity.
-    if (!root.get('initialIdentityImported', false)) {
+    if (
+      !root.get('initialIdentityImported', false) &&
+      this.list().some((p) => p.id === 'default')
+    ) {
       this.link('default', config.ADMIN_USER_ID, {
         playerId: config.RUST_STEAM_ID,
         playerToken: config.RUST_PLAYER_TOKEN,
@@ -156,7 +159,41 @@ export class Servers {
   }
   selected(user: string): string {
     const id = this.root.get(`selectedServer:${user}`, 'default');
-    return this.list().some((p) => p.id === id) ? id : 'default';
+    return this.list().some((p) => p.id === id) ? id : this.list()[0]?.id || '';
+  }
+  // Call only after services have drained and Discord panel deletion has succeeded.
+  remove(id: string): void {
+    this.get(id);
+    const store = this.store(id);
+    const forget = () => {
+      this.root.deleteSettings(
+        (key) =>
+          key === `serverCredentials:${id}` ||
+          key === `identityUsers:${id}` ||
+          key === `chatOwnSteamIds:${id}` ||
+          key.startsWith(`identity:${id}:`) ||
+          key.startsWith(`identityInvalid:${id}:`) ||
+          (key.startsWith('selectedServer:') && this.root.get(key, '') === id),
+      );
+      this.root.set(
+        'serverProfiles',
+        this.list().filter((p) => p.id !== id),
+      );
+    };
+    if (store === this.root) {
+      this.root.transaction(() => {
+        store.clearServerData();
+        forget();
+      });
+    } else {
+      store.transaction(() => {
+        store.clearServerData();
+        store.deleteSettings(() => true);
+      });
+      this.root.transaction(forget);
+      store.close();
+      this.stores.delete(id);
+    }
   }
   link(id: string, user: string, input: unknown): void {
     this.get(id);

@@ -107,6 +107,10 @@ describe('persistent Discord control panel', () => {
       });
       expect(f.panel.isPanel('panel1')).toBe(false);
       expect(f.panel.isPanel('moved-panel')).toBe(true);
+      expect(f.store.get('serverPanelMessages', [])).toEqual([
+        { channelId: 'old-channel', messageId: 'panel1' },
+        { channelId: 'shared-panels', messageId: 'moved-panel' },
+      ]);
       expect(f.message.edit).toHaveBeenCalledWith(expect.objectContaining({ components: [] }));
       f.fetch.mockResolvedValue(moved);
       await f.panel.create('shared-panels');

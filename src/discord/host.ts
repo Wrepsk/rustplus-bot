@@ -40,6 +40,8 @@ import { Cameras } from '../cameras/service';
 import { CameraWeb } from '../cameras/web';
 import { CameraError } from '../cameras/registry';
 import { CameraPanel } from './camera-panel';
+import { deleteServerPanels } from './server-panels';
+import type { Store } from '../database';
 
 type HostComponent = ButtonInteraction | ModalSubmitInteraction | StringSelectMenuInteraction;
 
@@ -67,6 +69,17 @@ export class DiscordHost {
   private stopping = false;
   private queued = 0;
   private pendingCommands = new Map<string, PendingCommand>();
+  private removing = new Set<string>();
+  private pendingRemovals = new Map<
+    string,
+    {
+      owner: string;
+      guildId: string;
+      server: string;
+      expires: number;
+      store: Store;
+    }
+  >();
   constructor(
     private config: Config,
     readonly servers: Servers,
@@ -152,6 +165,7 @@ export class DiscordHost {
     return session;
   }
   private cameraPanel(id: string): CameraPanel {
+    if (this.removing.has(id)) throw new HostError('This server is being removed.');
     let panel = this.cameraPanels.get(id);
     if (!panel) {
       panel = new CameraPanel(
@@ -171,6 +185,7 @@ export class DiscordHost {
   }
   private configureChatChannel(id: string, channel: string): Promise<void> {
     return this.serialize(async () => {
+      this.servers.get(id);
       const affected = [id];
       for (const profile of this.servers.list()) {
         if (profile.id === id) continue;
@@ -274,10 +289,16 @@ export class DiscordHost {
     };
   }
   private permissions(id: string, principal: Principal, admin = false): void {
+    if (this.removing.has(id)) throw new HostError('This server is being removed.');
+    if (id && !this.servers.list().some((p) => p.id === id))
+      throw new HostError('This server was removed. Run /server list.');
     const permissions = new Permissions(
       this.config.DISCORD_GUILD_ID,
       this.config.ADMIN_USER_ID,
-      () => this.servers.store(id).get<string[]>('allowedRoles', this.config.ALLOWED_ROLE_IDS),
+      () =>
+        id
+          ? this.servers.store(id).get<string[]>('allowedRoles', this.config.ALLOWED_ROLE_IDS)
+          : this.config.ALLOWED_ROLE_IDS,
     );
     if (!(admin ? permissions.admin(principal) : permissions.operate(principal)))
       throw new HostError(
@@ -305,8 +326,9 @@ export class DiscordHost {
     const name = interaction.commandName;
     if (name === 'server')
       return (
-        ['use', 'pause', 'resume', 'rename'].includes(interaction.options.getSubcommand()) &&
-        !interaction.options.getString('id')
+        ['use', 'pause', 'resume', 'rename', 'remove'].includes(
+          interaction.options.getSubcommand(),
+        ) && !interaction.options.getString('id')
       );
     if (name === 'pair') return interaction.options.getSubcommand() === 'status';
     return ['panel', 'device', 'alarm', 'chat', 'settings', 'status', 'ping', 'camera'].includes(
@@ -453,6 +475,8 @@ export class DiscordHost {
         components: [],
         allowedMentions: { parse: [] },
       });
+    } else if (sub === 'remove') {
+      await this.confirmRemoval(response, id, principal);
     } else if (sub === 'rename') {
       const profile = await this.serialize(async () => {
         let renamed;
@@ -493,6 +517,147 @@ export class DiscordHost {
       });
     }
   }
+  private async confirmRemoval(
+    response: Pick<ChatInputCommandInteraction, 'editReply'>,
+    id: string,
+    principal: Principal,
+  ): Promise<void> {
+    this.permissions(id, principal, true);
+    const profile = this.servers.get(id);
+    for (const [key, pending] of this.pendingRemovals)
+      if (pending.expires <= Date.now()) this.pendingRemovals.delete(key);
+    if (this.pendingRemovals.size >= 200)
+      throw new HostError('Too many pending confirmations. Try again in a few minutes.');
+    const token = randomBytes(12).toString('hex');
+    this.pendingRemovals.set(token, {
+      owner: principal.id,
+      guildId: this.config.DISCORD_GUILD_ID,
+      server: id,
+      expires: Date.now() + 5 * 60000,
+      store: this.servers.store(id),
+    });
+    try {
+      await response.editReply({
+        embeds: [
+          card(
+            'Remove this server?',
+            `**${escapeMarkdown(profile.name)}**\n\nThis permanently removes its bot configuration, devices, cameras and personal server links. Monitoring and camera viewers will stop, and its base and camera panels will be deleted.\n\nExisting Discord chat and alert messages stay. Other servers and your pairing listener stay configured. You can add the server again by pairing.\n\nConfirm within **5 minutes**.`,
+            profile.name,
+          ),
+        ],
+        components: [
+          new ActionRowBuilder<ButtonBuilder>().addComponents(
+            button(
+              `remove-server:${token}:confirm`,
+              'Permanently remove server',
+              ButtonStyle.Danger,
+            ),
+            button(`remove-server:${token}:cancel`, 'Cancel'),
+          ),
+        ],
+        allowedMentions: { parse: [] },
+      });
+    } catch (error) {
+      this.pendingRemovals.delete(token);
+      throw error;
+    }
+  }
+  private async removalControl(interaction: ButtonInteraction): Promise<void> {
+    try {
+      const [, token, action] = interaction.customId.split(':');
+      const pending = this.pendingRemovals.get(token);
+      if (!pending || pending.expires <= Date.now()) {
+        this.pendingRemovals.delete(token);
+        throw new HostError(
+          'This confirmation expired or was already used. Run /server remove again.',
+        );
+      }
+      if (pending.owner !== interaction.user.id || pending.guildId !== interaction.guildId)
+        throw new HostError('This private confirmation belongs to another Discord member.');
+      if (!['confirm', 'cancel'].includes(action)) throw new HostError('Invalid confirmation.');
+      this.pendingRemovals.delete(token); // One use, even if two clicks arrive together.
+      await interaction.deferUpdate();
+      if (action === 'cancel') {
+        await interaction.editReply({
+          embeds: [card('Removal cancelled', 'The server was kept.')],
+          components: [],
+        });
+        return;
+      }
+      const principal = await this.principal(interaction);
+      this.permissions(pending.server, principal, true);
+      await interaction.editReply({
+        embeds: [card('Removing server…', 'Stopping its connections and deleting its panels.')],
+        components: [],
+      });
+      const name = await this.serialize(async () => {
+        const id = pending.server;
+        const profile = this.servers.get(id);
+        if (this.servers.store(id) !== pending.store)
+          throw new HostError(
+            'This server has been removed and paired again. Run /server remove again.',
+          );
+        this.removing.add(id);
+        try {
+          this.servers.enable(id, false); // Persist first: a restart cannot resurrect monitoring.
+          this.cameras.pause(id);
+          const session = this.sessions.get(id);
+          this.sessions.delete(id);
+          const cameraPanel = this.cameraPanels.get(id);
+          cameraPanel?.stop();
+          this.cameraPanels.delete(id);
+          session?.identities.stop();
+          await Promise.all([session?.bot.stop(), cameraPanel?.drain()]);
+          try {
+            await deleteServerPanels(this.client, this.servers.store(id));
+          } catch (error) {
+            log.warn({ server: id, code: errorCode(error) }, 'Server panel deletion failed');
+            throw new HostError(
+              'Panel deletion failed. The server is paused and its configuration is kept. Restore the bot’s View Channel and Read Message History permissions in its panel channels, check Discord connectivity, then retry /server remove. Already deleted panels stay deleted.',
+            );
+          }
+          this.servers.remove(id);
+          for (const [key, removal] of this.pendingRemovals)
+            if (removal.server === id) this.pendingRemovals.delete(key);
+          for (const [key, command] of this.pendingCommands) {
+            command.serverIds = command.serverIds.filter((server) => server !== id);
+            if (!command.serverIds.length) this.pendingCommands.delete(key);
+          }
+          return profile.name;
+        } finally {
+          this.removing.delete(id);
+        }
+      });
+      await interaction.editReply({
+        embeds: [
+          card(
+            'Server removed',
+            `**${escapeMarkdown(name)}** and its saved panels were removed. Existing Discord chat and alert messages were kept. Pair again to add it back.`,
+          ),
+        ],
+        components: [],
+        allowedMentions: { parse: [] },
+      });
+    } catch (error) {
+      log.warn({ code: errorCode(error) }, 'Server removal failed');
+      const content =
+        error instanceof HostError
+          ? error.message
+          : 'Server removal failed. Check logs and retry /server remove.';
+      if (interaction.deferred || interaction.replied)
+        await interaction.editReply({
+          embeds: [card('Request failed', content)],
+          components: [],
+          allowedMentions: { parse: [] },
+        });
+      else
+        await interaction.reply({
+          content,
+          flags: MessageFlags.Ephemeral,
+          allowedMentions: { parse: [] },
+        });
+    }
+  }
   private async reply(
     interaction: ChatInputCommandInteraction,
     title: string,
@@ -515,6 +680,10 @@ export class DiscordHost {
     });
   }
   private async interaction(interaction: Interaction): Promise<void> {
+    if (interaction.isButton() && interaction.customId.startsWith('remove-server:')) {
+      await this.removalControl(interaction);
+      return;
+    }
     if (
       (interaction.isStringSelectMenu?.() || interaction.isButton()) &&
       interaction.customId.startsWith('campanel:')
@@ -632,6 +801,19 @@ export class DiscordHost {
         return;
       }
       const id = this.selected(interaction);
+      if (!id && !['server', 'pair'].includes(interaction.commandName)) {
+        await interaction.reply({
+          embeds: [
+            card(
+              'No saved Rust servers',
+              'Use `/pair start`, pair the server in-game, then accept it in `/pair inbox`.',
+            ),
+          ],
+          flags: MessageFlags.Ephemeral,
+          allowedMentions: { parse: [] },
+        });
+        return;
+      }
       if (interaction.commandName === 'camera') {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         await this.cameraAction(interaction, interaction, id, await this.principal(interaction));
@@ -647,20 +829,13 @@ export class DiscordHost {
       if (interaction.commandName === 'pair' && sub === 'unlink') {
         // Guild members can always revoke their own credentials after losing roles.
       } else if (interaction.commandName === 'pair' || sub === 'list') {
-        const authorized = this.servers.list().some((p) => {
-          try {
-            this.permissions(p.id, principal);
-            return true;
-          } catch {
-            return false;
-          }
-        });
-        if (!authorized) throw new HostError('An allowed operator role is required.');
+        this.operatorSomewhere(principal);
       } else if (sub !== 'use') this.permissions(id, principal);
       if (interaction.commandName === 'server') {
         if (sub === 'list') {
           await interaction.editReply(this.serverView(principal.id));
         } else {
+          if (!id) throw new HostError('No saved servers. Use /pair start to add one.');
           await this.serverAction(
             interaction,
             interaction,
@@ -875,6 +1050,10 @@ export class DiscordHost {
     });
   }
   private operatorSomewhere(principal: Principal): void {
+    if (!this.servers.list().length) {
+      this.permissions('', principal);
+      return;
+    }
     for (const profile of this.servers.list()) {
       try {
         this.permissions(profile.id, principal);
@@ -915,6 +1094,9 @@ export class DiscordHost {
           const id = interaction.values[0];
           this.permissions(id, principal);
           this.servers.select(principal.id, id);
+        } else if (action === 'remove' && interaction.isButton()) {
+          await this.confirmRemoval(interaction, target, principal);
+          return;
         } else if (['pause', 'resume'].includes(action) && interaction.isButton()) {
           this.permissions(target, principal, true);
           await this.serialize(async () => {
@@ -1121,6 +1303,7 @@ export class DiscordHost {
     this.stopping = true;
     for (const panel of this.cameraPanels.values()) panel.stop();
     this.pendingCommands.clear();
+    this.pendingRemovals.clear();
     this.cameras.stop();
     await this.web?.stop();
     this.pairing.stop();
